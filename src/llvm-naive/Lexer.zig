@@ -20,15 +20,20 @@ const Token = struct {
     const Kind = enum(usize) {
         err,
         eof,
-        float,
         integer_type,
         label,
 
+        integer_literal,
+        float_literal,
+        hex_float_literal,
+
         global_var,
         global_id,
-
         local_var,
         local_var_id,
+        metadata_var, // needs to be escaped
+        summary_id,
+        attr_grp_id,
 
         equal,
         lsquare,
@@ -43,6 +48,11 @@ const Token = struct {
         star,
         bar,
         colon,
+        dotdotdot,
+        exclaim,
+        hash,
+
+        string_constant,
 
         // begin non-reserved
         declare,
@@ -107,7 +117,7 @@ pub fn next(self: *Lexer) !Token {
             '_', 'a'...'z', 'A'...'Z' => {
                 return try self.lexIdentifier();
             },
-            // Ignore whitespace
+            // ignore whitespace
             0, ' ', '\t', '\n', '\r' => {
                 continue;
             },
@@ -117,12 +127,16 @@ pub fn next(self: *Lexer) !Token {
             // will not support comdat or weird labels
             '$' => return err,
             '%' => return self.lexPercent(),
-            //
+            '"' => return self.lexQuote(),
+            '.' => return self.lexDot(),
             ';' => {
                 self.skipLineComment();
                 continue;
             },
-            //
+            '!' => return self.lexExclaim(),
+            '^' => return self.lexCaret(),
+            '#' => return self.lexHash(),
+            '0'...'9', '-' => return self.lexDigitOrNegative(),
             '=' => return self.single(.equal),
             '[' => return self.single(.lsquare),
             ']' => return self.single(.rsquare),
@@ -302,7 +316,7 @@ fn lexUIntID(self: *Lexer, varId: Token.Kind) Token {
     // returned, otherwise the Error token is returned.""
     
     var loc: Token.Loc = .{
-        // start after the %, the start..end contains the actual variable name
+        // start after the %, ^, the start..end contains the actual variable name
         .start = self.idx,
         .end = undefined,
     };
@@ -322,6 +336,13 @@ fn lexUIntID(self: *Lexer, varId: Token.Kind) Token {
     return .{ .kind = varId, .loc = loc };
 }
 
+fn isVarSpecial(ch: u8) bool {
+    return switch (ch) {
+        '-', '$', '.', '_' => true,
+        else => false,
+    };
+}
+
 fn readVarName(self: *Lexer, varKind: Token.Kind) ?Token {
     // "Handle VarName: [-a-zA-Z$._][-a-zA-Z$._0-9]*"
     // "ReadVarName - Read the rest of a token containing a variable name."
@@ -332,24 +353,247 @@ fn readVarName(self: *Lexer, varKind: Token.Kind) ?Token {
         .end = undefined,
     };
 
-    const isCond = struct {
-        fn isCond(ch: u8) bool {
-            return switch (ch) {
-                '-', '$', '.', '_' => true,
-                else => false,
-            };
-        }
-    }.isCond;
-
-    if (isCond(self.b[self.idx]) or ascii.isAlphabetic(self.b[self.idx])) {
+    if (isVarSpecial(self.b[self.idx]) or ascii.isAlphabetic(self.b[self.idx])) {
         self.idx += 1;
-        while (isCond(self.b[self.idx]) or ascii.isAlphanumeric(self.b[self.idx])) {
+        while (isVarSpecial(self.b[self.idx]) or ascii.isAlphanumeric(self.b[self.idx])) {
             self.idx += 1;
         }
         loc.end = self.idx;
         return .{ .loc = loc, .kind = varKind };
     }
     return null;
+}
+
+fn lexQuote(self: *Lexer) Token {
+    // "Lex all tokens that start with a " character."
+    //   QuoteLabel        "[^"]+":
+    //   StringConstant    "[^"]*"
+
+    var loc: Token.Loc = .{
+        // start after the ", the start..end contains the actual string
+        .start = self.idx,
+        .end = undefined,
+    };
+
+    while (self.adv()) |ch| {
+        if (ch == '"') {
+            // don't include the "
+            loc.end = self.idx - 1;
+
+            var kind: Token.Kind = .string_constant;
+            if (self.b[self.idx] == ':') {
+                self.idx += 1;
+                // we don't check if a nul character is in this name
+                kind = .label;
+            }
+            return .{ .kind = kind, .loc = loc };
+        }
+    } else {
+        loc.end = self.idx;
+        return .{ .kind = .err, .loc = loc };
+    }
+}
+
+fn isLabelTail(self: *Lexer, start_idx: usize) ?usize {
+    // "Return true if this pointer points to a valid end of a label."
+    
+    var cursor = start_idx;
+    while (isLabelChar(self.b[cursor])) {
+        cursor += 1;
+    }
+
+    if (self.b[cursor] == ':') {
+        return cursor + 1; // Return index after the colon.
+    }
+
+    return null;
+}
+
+fn lexDigitOrNegative(self: *Lexer) Token {
+    // "Lex tokens for a label or a numeric constant, possibly starting with -."
+    //    Label             [-a-zA-Z$._0-9]+:
+    //    NInteger          -[0-9]+
+    //    FPConstant        [-+]?[0-9]+[.][0-9]*([eE][-+]?[0-9]+)?
+    //    PInteger          [0-9]+
+    //    HexFPConstant     0x[0-9A-Fa-f]+
+    //    HexFP80Constant   0xK[0-9A-Fa-f]+
+    //    HexFP128Constant  0xL[0-9A-Fa-f]+
+    //    HexPPC128Constant 0xM[0-9A-Fa-f]+
+
+    const start = self.idx - 1;
+    var loc: Token.Loc = .{
+        .start = start,
+        .end = undefined,
+    };
+
+    // "If the letter after the negative is not a number, this is probably a label."
+    if (!ascii.isDigit(self.b[start]) and !ascii.isDigit(self.b[self.idx])) {
+        // "Okay, this is not a number after the -, it's probably a label."
+        if (isLabelTail(self, self.idx)) |end_idx| {
+            self.idx = end_idx;
+            loc.end = end_idx - 1; // do not include the :
+            return .{ .kind = .label, .loc = loc };
+        }
+        loc.end = self.idx;
+        return .{ .kind = .err, .loc = loc };
+    }
+
+    // "At this point, it is either a label, int or fp constant."
+
+    // "Skip digits, we have at least one."
+    while (ascii.isDigit(self.b[self.idx])) {
+        self.idx += 1;
+    }
+
+    // "Check if this is a fully-numeric label:"
+    if (ascii.isDigit(self.b[start]) and self.b[self.idx] == ':') {
+        // we don't parse and validate the numeric label
+        loc.end = self.idx;
+        self.idx += 1; // "Skip the colon."
+        return .{ .kind = .label, .loc = loc };
+    }
+
+    // "Check to see if this really is a string label, e.g. "-1:"."
+    if (isLabelChar(self.b[self.idx]) or self.b[self.idx] == ':') {
+        if (isLabelTail(self, self.idx)) |end_idx| {
+            self.idx = end_idx;
+            loc.end = end_idx - 1; // do not include the :
+            return .{ .kind = .label, .loc = loc };
+        }
+    }
+
+    // "If the next character is a '.', then it is a fp value, otherwise its"
+    // "integer."
+    if (self.b[self.idx] != '.') {
+        if (self.b[start] == '0' and self.b[start + 1] == 'x') {
+            return self.lex0x(start);
+        }
+        loc.end = self.idx;
+        return .{ .kind = .integer_literal, .loc = loc };
+    }
+
+    self.idx += 1;
+
+    // "Skip over [0-9]*([eE][-+]?[0-9]+)?"
+    while (ascii.isDigit(self.b[self.idx])) {
+        self.idx += 1;
+    }
+
+    if (self.b[self.idx] == 'e' or self.b[self.idx] == 'E') {
+        if (ascii.isDigit(self.b[self.idx + 1]) or
+            (((self.b[self.idx + 1] == '-') or (self.b[self.idx + 1] == '+')) and
+            ascii.isDigit(self.b[self.idx + 2])))
+        {
+            self.idx += 2;
+            while (ascii.isDigit(self.b[self.idx])) {
+                self.idx += 1;
+            }
+        }
+    }
+
+    loc.end = self.idx;
+    return .{ .kind = .float_literal, .loc = loc };
+}
+
+fn lex0x(self: *Lexer, start: usize) Token {
+    // "Lex all tokens that start with a 0x prefix, knowing they match and are not
+    // labels."
+    //    HexFPConstant     0x[0-9A-Fa-f]+
+    //    HexFP80Constant   0xK[0-9A-Fa-f]+
+    //    HexFP128Constant  0xL[0-9A-Fa-f]+
+    //    HexPPC128Constant 0xM[0-9A-Fa-f]+
+    //    HexHalfConstant   0xH[0-9A-Fa-f]+
+    //    HexBFloatConstant 0xR[0-9A-Fa-f]+
+
+    var loc: Token.Loc = .{
+        .start = start,
+        .end = undefined,
+    };
+
+    self.idx = start + 2;
+
+    switch (self.b[self.idx]) {
+        'K', 'L', 'M', 'H', 'R' => self.idx += 1,
+        else => {},
+    }
+
+    if (!ascii.isHex(self.b[self.idx])) {
+        // "Bad token, return it as an error."
+        loc.end = self.idx;
+        return .{ .kind = .err, .loc = loc };
+    }
+
+    while (ascii.isHex(self.b[self.idx])) {
+        self.idx += 1;
+    
+    }
+    loc.end = self.idx;
+    return .{ .kind = .hex_float_literal, .loc = loc };
+}
+
+fn lexDot(self: *Lexer) Token {
+    var loc: Token.Loc = .{
+        .start = self.idx - 1,
+        .end = undefined,
+    };
+    
+    if (isLabelTail(self, self.idx)) |end_idx| {
+        self.idx = end_idx;
+        loc.end = end_idx - 1; // do not include the :
+        return .{ .kind = .label, .loc = loc };
+    }
+    if (self.b[self.idx] == '.' and self.b[self.idx + 1] == '.') {
+        self.idx += 2;
+        loc.end = self.idx;
+        return .{ .kind = .dotdotdot, .loc = loc };
+    }
+
+    loc.end = self.idx;
+    return .{ .kind = .err, .loc = loc };
+}
+
+fn lexExclaim(self: *Lexer) Token {
+    var loc: Token.Loc = .{
+        .start = self.idx - 1,
+        .end = undefined,
+    };
+
+    if (isVarSpecial(self.b[self.idx]) or ascii.isAlphabetic(self.b[self.idx]) or
+        self.b[self.idx] == '\\')
+    {
+        self.idx += 1;
+        while (isVarSpecial(self.b[self.idx]) or ascii.isAlphanumeric(self.b[self.idx]) or self.b[self.idx] == '\\') {
+            self.idx += 1;
+        }
+
+        // skip !
+        loc.start = loc.start + 1;
+        loc.end = self.idx;
+        return .{ .kind = .metadata_var, .loc = loc };
+    }
+    loc.end = self.idx;
+    return .{ .kind = .exclaim, .loc = loc };
+}
+
+fn lexCaret(self: *Lexer) Token {
+    // "Lex all tokens that start with a ^ character."
+    //    SummaryID ::= ^[0-9]+
+    return self.lexUIntID(.summary_id);
+}
+
+fn lexHash(self: *Lexer) Token {
+    // "Lex all tokens that start with a # character."
+    //    AttrGrpID ::= #[0-9]+
+    //    Hash ::= #
+
+    if (ascii.isDigit(self.b[self.idx])) {
+        return self.lexUIntID(.attr_grp_id);
+    }
+    const loc: Token.Loc = .{
+        .start = self.idx - 1,
+        .end = self.idx,
+    };
+    return .{ .kind = .hash, .loc = loc };
 }
 
 // fn lexPositive(self: *Lexer) Token {
@@ -454,6 +698,23 @@ test "simple" {
         .{ .id = .{ .local_var_id, "1" } }, .{ .id = .{ .equal, null } }, .{ .lit = "alloca" }, .{ .id = .{ .integer_type, "i32" } },
         //
         .{ .lit = "br" }, .{ .lit = "label" }, .{ .id = .{ .local_var_id, "2" } },
+        .{ .id = .{ .label, "3" } }, .{ .id = .{ .label, "2" } },
+        .{ .id = .{ .label, "-4" } }, .{ .id = .{ .label, "-erm" } }, .{ .id = .{ .label, ".label" } }, .{ .id = .{ .label, "..erm..label" } },
+            .{ .id = .{ .dotdotdot, null } },
+        //
+        .{ .id = .{ .integer_literal, "123" } }, .{ .id = .{ .integer_literal, "-163" } },
+        .{ .id = .{ .float_literal, "1231." } },
+        .{ .id = .{ .hex_float_literal, "0x7FF0000000000000" } }, .{ .id = .{ .comma, null } },
+            .{ .id = .{ .float_literal, "1.000000e+01" } },
+        .{ .id = .{ .hex_float_literal, "0x8000000000000000" } },
+        //
+        .{ .lit = "ret" }, .{ .lit = "bfloat" }, .{ .id = .{ .hex_float_literal, "0xRFF80" } },
+        //
+        .{ .id = .{ .exclaim, null } }, .{ .id = .{ .metadata_var, "." } }, .{ .id = .{ .comma, null } },
+        .{ .id = .{ .metadata_var, "BBBa\\\\ng" } }, .{ .id = .{ .metadata_var, "bang" } },
+        //
+        .{ .id = .{ .summary_id, "23" } },
+        .{ .id = .{ .attr_grp_id, "231" } }, .{ .id = .{ .hash, null } },
         //
         .{ .id = .{ .eof, null } },
     };
@@ -463,6 +724,27 @@ test "simple" {
         \\; Implicit entry label. Not printed on output.
         \\  %1 = alloca i32
         \\  br label %2
+        \\
+        \\3: ; Explicit numeric label
+        \\"2": ; string label, quoted number
+        \\
+        \\-4:   ; evil label
+        \\-erm: ; evil label
+        \\.label:
+        \\..erm..label: ...
+        \\
+        \\123 -163
+        \\1231.
+        \\0x7FF0000000000000, 1.000000e+01
+        \\0x8000000000000000
+        \\
+        \\ret bfloat 0xRFF80
+        \\
+        \\! !.,
+        \\!BBBa\\ng !bang
+        \\
+        \\^23
+        \\#231 #
     ;
     try testPieces(buffer, &pieces);
 }
@@ -478,4 +760,31 @@ test "nul" {
         "define\x00i32\x00 @test1\x00(\x00i32 %X\x00)\x00"
     ;
     try testPieces(buffer, &pieces);
+}
+
+test "amalgamation" {
+    const allocator = std.testing.allocator;
+    const expect = std.testing.expect;
+
+    // this is a sort of "catch" all regression test.
+    // the actual lexed tokens have been inspected to make sure they're correct
+
+    const buffer = @embedFile("./test/sqlite3.ll");
+
+    var lexer = Lexer.init(buffer, allocator);
+    defer lexer.deinit();
+
+    while (true) {
+        const tok = try lexer.next();
+        if (tok.kind == .eof) {
+            break;
+        }
+
+        errdefer std.debug.print(
+            "failed inside run {}..{} ({s})\n",
+            .{ tok.loc.start, tok.loc.end, tok.loc.slice(buffer) }
+        );
+
+        try expect(tok.kind != .err);
+    }
 }
