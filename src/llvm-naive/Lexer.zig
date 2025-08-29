@@ -11,18 +11,17 @@ const Lexer = @This();
 b: [:0]const u8,
 idx: usize,
 token_map: TokenMap,
-allocator: Allocator,
 
-const Token = struct {
+pub const Token = struct {
     kind: Kind,
     loc: Loc,
 
-    const Kind = enum(usize) {
+    pub const Kind = enum(usize) {
         err,
         eof,
         integer_type,
-        label,
 
+        label_literal,
         integer_literal,
         float_literal,
         hex_float_literal,
@@ -31,7 +30,7 @@ const Token = struct {
         global_id,
         local_var,
         local_var_id,
-        metadata_var, // needs to be escaped
+        metadata_var, // needs to be unescaped (just \\)
         summary_id,
         attr_grp_id,
 
@@ -52,36 +51,192 @@ const Token = struct {
         exclaim,
         hash,
 
-        string_constant,
+        string_constant, // needs to be unescaped
 
         // begin non-reserved
         declare,
         define,
+        target,
+        source_filename,
+
+        // types
+        @"void",
+        half,
+        bfloat,
+        float,
+        double,
+        x86_fp80,
+        fp128,
+        ppc_fp128,
+        x86_amx,
+        ptr,
+        //
+        metadata,
+        token,
+        label,
+
+        @"addrspace",
+
+        // Linkage Types
+        private,
+        internal,
+        availiable_externally,
+        linkonce,
+        weak,
+        common,
+        appending,
+        extern_weak,
+        linkonce_odr,
+        weak_odr,
+        external,
+
+        // Visibility
+        default,
+        hidden,
+        protected,
+
+        // DLL Storage Class
+        dllimport,
+        dllexport,
+
+        // Calling Convention
+        ccc,
+        fastcc,
+        intel_ocl_bicc,
+        coldcc,
+        cfguard_checkcc,
+        x86_stdcallcc,
+        x86_fastcallcc,
+        x86_thiscallcc,
+        x86_vectorcallcc,
+        arm_apcscc,
+        arm_aapcscc,
+        arm_aapcs_vfpcc,
+        aarch64_vector_pcs,
+        aarch64_sve_vector_pcs,
+        aarch64_sme_preservemost_from_x0,
+        aarch64_sme_preservemost_from_x1,
+        aarch64_sme_preservemost_from_x2,
+        msp430_intrcc,
+        avr_intrcc,
+        avr_signalcc,
+        ptx_kernel,
+        ptx_device,
+        spir_func,
+        spir_kernel,
+        x86_64_sysvcc,
+        win64cc,
+        anyregcc,
+        preserve_mostcc,
+        preserve_allcc,
+        preserve_nonecc,
+        ghccc,
+        swiftcc,
+        swifttailcc,
+        x86_intrcc,
+        hhvmcc,
+        hhvm_ccc,
+        cxx_fast_tlscc,
+        amdgpu_vs,
+        amdgpu_ls,
+        amdgpu_hs,
+        amdgpu_es,
+        amdgpu_gs,
+        amdgpu_ps,
+        amdgpu_cs,
+        amdgpu_cs_chain,
+        amdgpu_cs_chain_preserve,
+        amdgpu_kernel,
+        tailcc,
+        m68k_rtdcc,
+        graalcc,
+        riscv_vector_cc,
+        riscv_vls_cc,
+        cc,
+        
         _,
+
+        pub fn forgettable(kind: Kind) bool {
+            return switch (kind) {
+                // Linkage Types
+                .private....external => true,
+                // Visibility
+                .default....protected => true,
+                // DLL Storage Class
+                .dllimport....dllexport => true,
+                // Calling Convention
+                .ccc....cc => true,
+                else => false,
+            };
+        }
+
+        pub fn isType(kind: Kind) bool {
+            return switch (kind) {
+                .@"void"....ptr => true,
+                else => false,
+            };
+        }
     };
 
     pub const Loc = struct {
         start: usize,
         end: usize,
 
-        fn slice(self: *const Loc, buffer: [:0]const u8) []const u8 {
+        fn slice(self: Loc, buffer: [:0]const u8) []const u8 {
             return buffer[self.start..self.end];
+        }
+
+        fn sliceUnescape(self: Loc, allocator: Allocator, buffer: [:0]const u8) ![]const u8 {
+            const str = self.slice(buffer);
+
+            // "UnEscapeLexed - Run through the specified buffer and change \xx codes to the
+            // appropriate character."
+
+            var unescaped = try std.ArrayList(u8).initCapacity(allocator, str.len);
+            errdefer unescaped.deinit(allocator);
+
+            var i: usize = 0;
+            while (i < str.len) {
+                if (str[i] == '\\') {
+                    if (i + 1 < str.len and str[i + 1] == '\\') {
+                        unescaped.appendAssumeCapacity('\\');
+                        i += 2;
+                    } else if (
+                        i + 2 < str.len and ascii.isHex(str[i + 1]) and
+                        ascii.isHex(str[i + 2])
+                    ) {
+                        const hi = hexDigitToInt(str[i + 1]);
+                        const lo = hexDigitToInt(str[i + 2]);
+                        const byte_val = @as(u8, @intCast(hi * 16 + lo));
+
+                        unescaped.appendAssumeCapacity(byte_val);
+                        i += 3;
+                    }
+                    else {
+                        unescaped.appendAssumeCapacity('\\');
+                        i += 1;
+                    }
+                } else {
+                    unescaped.appendAssumeCapacity(str[i]);
+                    i += 1;
+                }
+            }
+            return unescaped.toOwnedSlice(allocator);
         }
     };
 };
 
-pub fn init(buffer: [:0]const u8, allocator: Allocator) Lexer {
+pub fn init(buffer: [:0]const u8) Lexer {
     // skip the UTF-8 BOM if present
     return .{
         .b = buffer,
-        .allocator = allocator,
         .idx = if (std.mem.startsWith(u8, buffer, "\xEF\xBB\xBF")) 3 else 0,
         .token_map = .init,
     };
 }
 
-pub fn deinit(self: *Lexer) void {
-    self.token_map.deinit(self.allocator);
+pub fn deinit(self: *Lexer, allocator: Allocator) void {
+    self.token_map.deinit(allocator);
 }
 
 fn adv(self: *Lexer) ?u8 {
@@ -105,7 +260,7 @@ fn adv0(self: *Lexer) u8 {
     return self.adv() orelse 0;
 }
 
-pub fn next(self: *Lexer) !Token {
+pub fn next(self: *Lexer, allocator: Allocator) !Token {
     while (true) {
         const err: Token = .{
             .kind = .err,
@@ -115,7 +270,7 @@ pub fn next(self: *Lexer) !Token {
         if (self.adv()) |curr| switch (curr) {
             // [a-zA-Z_]
             '_', 'a'...'z', 'A'...'Z' => {
-                return try self.lexIdentifier();
+                return try self.lexIdentifier(allocator);
             },
             // ignore whitespace
             0, ' ', '\t', '\n', '\r' => {
@@ -209,7 +364,7 @@ fn isLabelChar(ch : u8) bool {
     };
 }
 
-fn lexIdentifier(self: *Lexer) !Token {
+fn lexIdentifier(self: *Lexer, allocator: Allocator) !Token {
     // "Lex a label, integer type, keyword, or hexadecimal integer constant."
     //    Label           [-a-zA-Z$._0-9]+:
     //    IntegerType     i[0-9]+
@@ -254,13 +409,13 @@ fn lexIdentifier(self: *Lexer) !Token {
 
     if (self.b[self.idx] == ':') {
         loc.end = self.idx + 1;
-        return .{ .kind = .label, .loc = loc };
+        return .{ .kind = .label_literal, .loc = loc };
     }
 
     loc.end = self.idx;
 
     // catch all Keywords
-    const ident = try self.token_map.intern(self.allocator, loc.slice(self.b));
+    const ident = try self.token_map.intern(allocator, loc.slice(self.b));
     return .{ .kind = ident, .loc = loc };
 }
 
@@ -384,7 +539,7 @@ fn lexQuote(self: *Lexer) Token {
             if (self.b[self.idx] == ':') {
                 self.idx += 1;
                 // we don't check if a nul character is in this name
-                kind = .label;
+                kind = .label_literal;
             }
             return .{ .kind = kind, .loc = loc };
         }
@@ -432,7 +587,7 @@ fn lexDigitOrNegative(self: *Lexer) Token {
         if (isLabelTail(self, self.idx)) |end_idx| {
             self.idx = end_idx;
             loc.end = end_idx - 1; // do not include the :
-            return .{ .kind = .label, .loc = loc };
+            return .{ .kind = .label_literal, .loc = loc };
         }
         loc.end = self.idx;
         return .{ .kind = .err, .loc = loc };
@@ -450,7 +605,7 @@ fn lexDigitOrNegative(self: *Lexer) Token {
         // we don't parse and validate the numeric label
         loc.end = self.idx;
         self.idx += 1; // "Skip the colon."
-        return .{ .kind = .label, .loc = loc };
+        return .{ .kind = .label_literal, .loc = loc };
     }
 
     // "Check to see if this really is a string label, e.g. "-1:"."
@@ -458,7 +613,7 @@ fn lexDigitOrNegative(self: *Lexer) Token {
         if (isLabelTail(self, self.idx)) |end_idx| {
             self.idx = end_idx;
             loc.end = end_idx - 1; // do not include the :
-            return .{ .kind = .label, .loc = loc };
+            return .{ .kind = .label_literal, .loc = loc };
         }
     }
 
@@ -540,7 +695,7 @@ fn lexDot(self: *Lexer) Token {
     if (isLabelTail(self, self.idx)) |end_idx| {
         self.idx = end_idx;
         loc.end = end_idx - 1; // do not include the :
-        return .{ .kind = .label, .loc = loc };
+        return .{ .kind = .label_literal, .loc = loc };
     }
     if (self.b[self.idx] == '.' and self.b[self.idx + 1] == '.') {
         self.idx += 2;
@@ -647,6 +802,15 @@ fn lexHash(self: *Lexer) Token {
 //     };
 // }
 
+fn hexDigitToInt(c: u8) u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => unreachable,
+    };
+}
+
 const TestPiece = union(enum) {
     id: struct { Token.Kind, ?[:0]const u8 },
     lit: [:0]const u8,
@@ -657,12 +821,12 @@ fn testPieces(buffer: [:0]const u8, pieces: []const TestPiece) !void {
     const expectEqual = std.testing.expectEqual;
     const expectEqualStrings = std.testing.expectEqualStrings;
 
-    var lexer = Lexer.init(buffer, allocator);
-    defer lexer.deinit();
+    var lexer = Lexer.init(buffer);
+    defer lexer.deinit(allocator);
 
     var i: usize = 0;
     while (true) {
-        const tok = try lexer.next();
+        const tok = try lexer.next(allocator);
 
         errdefer std.debug.print(
             "failed inside run {}..{} ({s})\n",
@@ -698,8 +862,8 @@ test "simple" {
         .{ .id = .{ .local_var_id, "1" } }, .{ .id = .{ .equal, null } }, .{ .lit = "alloca" }, .{ .id = .{ .integer_type, "i32" } },
         //
         .{ .lit = "br" }, .{ .lit = "label" }, .{ .id = .{ .local_var_id, "2" } },
-        .{ .id = .{ .label, "3" } }, .{ .id = .{ .label, "2" } },
-        .{ .id = .{ .label, "-4" } }, .{ .id = .{ .label, "-erm" } }, .{ .id = .{ .label, ".label" } }, .{ .id = .{ .label, "..erm..label" } },
+        .{ .id = .{ .label_literal, "3" } }, .{ .id = .{ .label_literal, "2" } },
+        .{ .id = .{ .label_literal, "-4" } }, .{ .id = .{ .label_literal, "-erm" } }, .{ .id = .{ .label_literal, ".label" } }, .{ .id = .{ .label_literal, "..erm..label" } },
             .{ .id = .{ .dotdotdot, null } },
         //
         .{ .id = .{ .integer_literal, "123" } }, .{ .id = .{ .integer_literal, "-163" } },
@@ -766,16 +930,16 @@ test "amalgamation" {
     const allocator = std.testing.allocator;
     const expect = std.testing.expect;
 
-    // this is a sort of "catch" all regression test.
+    // this is a sort of "catch all" regression test.
     // the actual lexed tokens have been inspected to make sure they're correct
 
     const buffer = @embedFile("./test/sqlite3.ll");
 
-    var lexer = Lexer.init(buffer, allocator);
-    defer lexer.deinit();
+    var lexer = Lexer.init(buffer);
+    defer lexer.deinit(allocator);
 
     while (true) {
-        const tok = try lexer.next();
+        const tok = try lexer.next(allocator);
         if (tok.kind == .eof) {
             break;
         }
@@ -787,4 +951,23 @@ test "amalgamation" {
 
         try expect(tok.kind != .err);
     }
+}
+
+test "unescape" {
+    const allocator = std.testing.allocator;
+    const expectEqualStrings = std.testing.expectEqualStrings;
+
+    const buffer =
+        \\"\5Cbegin{\00\\"
+    ;
+
+    const loc: Token.Loc = .{
+        .start = 1,
+        .end = buffer.len - 1,
+    };
+
+    const str = try loc.sliceUnescape(allocator, buffer);
+    defer allocator.free(str);
+
+    try expectEqualStrings("\x5Cbegin{\x00\\", str);
 }
