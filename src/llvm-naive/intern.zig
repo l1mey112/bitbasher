@@ -79,7 +79,7 @@ pub fn StaticInternUnmanagedExtra(
             return @enumFromInt(idx + pieces.len);
         }
 
-        pub fn get(self: *This, inte: InternIdx) []const u8 {
+        pub fn get(self: *const This, inte: InternIdx) []const u8 {
             var idx = @intFromEnum(inte);
             if (idx < pieces.len) {
                 return pieces[idx].@"0";

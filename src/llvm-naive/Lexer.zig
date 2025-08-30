@@ -17,6 +17,9 @@ pub const Token = struct {
     loc: Loc,
 
     pub const Kind = enum(usize) {
+        const begin_forget = @intFromEnum(Kind.private);
+        const end_forget = @intFromEnum(Kind.local_unnamed_addr);
+
         err,
         eof,
         integer_type,
@@ -59,6 +62,17 @@ pub const Token = struct {
         target,
         source_filename,
 
+        // vectors
+        vscale,
+        x,
+
+        // prefix
+        prefix,
+        prologue,
+
+        gc,
+        personality,
+
         // types
         @"void",
         half,
@@ -76,6 +90,8 @@ pub const Token = struct {
         label,
 
         @"addrspace",
+
+        // --- begin_forget ---
 
         // Linkage Types
         private,
@@ -154,20 +170,57 @@ pub const Token = struct {
         riscv_vls_cc,
         cc,
         
+        // Random other attributes
+        unnamed_addr,
+        local_unnamed_addr,
+
+        // --- end_forget ---
+
+        // Parameter Attributes
+        // https://llvm.org/docs/LangRef.html#parameter-attributes
+        // -------------
+        // only a selection of attributes are written here, just the ones
+        // we need to know when to skip.
+        // test(<ty>)
+        byval,
+        byref,
+        preallocated,
+        inalloca,
+        sret,
+        elementtype,
+        captures,
+        dereferenceable,
+        dereferenceable_or_null,
+        nofpclass,
+        alignstack,
+        initializes,
+        range,
+        // align <n> or align(<n>)
+        @"align",        
+        
         _,
 
+        pub fn lit(kind: Kind, map: *const TokenMap) []const u8 {
+            return map.get(kind);
+        }
+
         pub fn forgettable(kind: Kind) bool {
-            return switch (kind) {
-                // Linkage Types
-                .private....external => true,
-                // Visibility
-                .default....protected => true,
-                // DLL Storage Class
-                .dllimport....dllexport => true,
-                // Calling Convention
-                .ccc....cc => true,
+            return switch (@intFromEnum(kind)) {
+                Kind.begin_forget...Kind.end_forget => true,
                 else => false,
             };
+        }
+
+        // .@"align" needs to be special cased
+        pub fn isAttributeParen(kind: Kind) bool {
+            return switch (@intFromEnum(kind)) {
+                @intFromEnum(Kind.byval)...@intFromEnum(Kind.range) => true,
+                else => false,
+            };
+        }
+
+        pub fn isAttributesAndBeyond(kind: Kind) bool {
+            return @intFromEnum(kind) >= @intFromEnum(Kind.byval);
         }
 
         pub fn isType(kind: Kind) bool {
@@ -182,11 +235,11 @@ pub const Token = struct {
         start: usize,
         end: usize,
 
-        fn slice(self: Loc, buffer: [:0]const u8) []const u8 {
+        pub fn slice(self: Loc, buffer: [:0]const u8) []const u8 {
             return buffer[self.start..self.end];
         }
 
-        fn sliceUnescape(self: Loc, allocator: Allocator, buffer: [:0]const u8) ![]const u8 {
+        pub fn sliceUnescape(self: Loc, allocator: Allocator, buffer: [:0]const u8) ![]const u8 {
             const str = self.slice(buffer);
 
             // "UnEscapeLexed - Run through the specified buffer and change \xx codes to the
@@ -222,6 +275,22 @@ pub const Token = struct {
                 }
             }
             return unescaped.toOwnedSlice(allocator);
+        }
+
+        // we can assume that integers will be in decimal form
+
+        pub fn unsigned(self: Loc, buffer: [:0]const u8) !u64 {
+            const str = self.slice(buffer);
+
+            if (str[0] == '-') {
+                return std.fmt.ParseIntError.InvalidCharacter;
+            }
+            return try std.fmt.parseInt(u64, str, 10);
+        }
+
+        pub fn signed(self: Loc, buffer: [:0]const u8) !i64 {
+            const str = self.slice(buffer);
+            return try std.fmt.parseInt(i64, str, 10);
         }
     };
 };
@@ -371,8 +440,9 @@ fn lexIdentifier(self: *Lexer, allocator: Allocator) !Token {
     //    Keyword         sdiv, float, ...
     //    HexIntConstant  [us]0x[0-9A-Fa-f]+
 
+    const start = self.idx - 1;
     var loc: Token.Loc = .{
-        .start = self.idx - 1,
+        .start = start,
         .end = undefined,
     };
 
@@ -382,7 +452,7 @@ fn lexIdentifier(self: *Lexer, allocator: Allocator) !Token {
     // we can safely ignore these hex constants, as it is assumed the textual format
     // comes from "llvm-dis"
 
-    if (self.b[self.idx - 1] == 'i' and ascii.isDigit(self.b[self.idx])) {
+    if (self.b[start] == 'i' and ascii.isDigit(self.b[self.idx])) {
         const after_i = self.idx;
         var int_start = after_i;
         while (ascii.isDigit(self.b[int_start])) {
@@ -405,11 +475,28 @@ fn lexIdentifier(self: *Lexer, allocator: Allocator) !Token {
     // "When true, the ':' is treated as a separate token."
     // bool IgnoreColonInIdentifiers = false;
 
-    // we can just assume the default, we don't need to be too compliant
+    // we can just assume the default, we don't need the other one
 
     if (self.b[self.idx] == ':') {
         loc.end = self.idx + 1;
         return .{ .kind = .label_literal, .loc = loc };
+    }
+    
+    // "Check for [us]0x[0-9A-Fa-f]+ which are Hexadecimal constant generated by
+    // the CFE to avoid forcing it to deal with 64-bit numbers."
+
+    // will not support [us] hex constants
+    if (
+        (self.b[start] == 'u' or self.b[start] == 's') and
+        self.b[start + 1] == '0' and self.b[start + 2] == 'x' and
+        ascii.isHex(self.b[start + 3])
+    ) {
+        self.idx = start + 3;
+        while (ascii.isHex(self.b[self.idx])) {
+            self.idx += 1;
+        }
+        loc.end = self.idx;
+        return .{ .kind = .err, .loc = loc };
     }
 
     loc.end = self.idx;
@@ -441,7 +528,7 @@ fn lexVar(self: *Lexer, varKind: Token.Kind, varId: Token.Kind) Token {
         .end = undefined,
     };
 
-    // wont't support @"..." and %"..."
+    // will not support @"..." and %"..."
     if (self.b[self.idx] == '"') {
         self.idx += 1;
 
@@ -880,6 +967,8 @@ test "simple" {
         .{ .id = .{ .summary_id, "23" } },
         .{ .id = .{ .attr_grp_id, "231" } }, .{ .id = .{ .hash, null } },
         //
+        .{ .id = .{ .err, "u0x23132" } }, .{ .id = .{ .err, "s0x0001" } },
+        //
         .{ .id = .{ .eof, null } },
     };
 
@@ -909,6 +998,9 @@ test "simple" {
         \\
         \\^23
         \\#231 #
+        \\
+        \\u0x23132
+        \\s0x0001
     ;
     try testPieces(buffer, &pieces);
 }
