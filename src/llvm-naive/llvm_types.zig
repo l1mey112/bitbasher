@@ -25,85 +25,63 @@ pub const TypeId = enum(usize) {
     ptr, // ignore addrspace
 
     _,
-};
 
-const _FmtContext = struct {
-    parser: *const Parser,
-    type_id: TypeId,
+    const _Fmt = struct {
+        parser: *const Parser,
+        type_id: TypeId,
 
-    pub fn format(self: _FmtContext, writer: *Writer) Writer.Error!void {
-        try self.formatInner(writer, self.type_id);
-        try writer.flush();
-    }
-
-    fn formatInner(self: _FmtContext, writer: *Writer, type_id: TypeId) Writer.Error!void {
-        if (@intFromEnum(type_id) < TypeTable.index_offset) {
-            // writes the enum without the leading dot
-            try writer.print("{s}", .{std.enums.tagName(TypeId, type_id) orelse unreachable});
-            return;
+        pub fn format(self: _Fmt, writer: *Writer) Writer.Error!void {
+            try self.formatInner(writer, self.type_id);
+            try writer.flush();
         }
 
-        const extra = self.parser.type_table.extra(type_id);
-        switch (extra) {
-            .integer => |v| try writer.print("i{}", .{v.bits}),
-            .@"struct" => |v| {
-                try writer.print("{{ ", .{});
-                for (v.xs, 0..) |x, i| {
-                    try self.formatInner(writer, x);
-                    if (i + 1 <= v.xs.len) {
-                        try writer.print(", ", .{});
-                    }
-                }
-                try writer.print(" }}", .{});
-            },
-            .vector => |v| {
-                try writer.print("<{} x ", .{v.elements});
-                try self.formatInner(writer, v.x);
-                try writer.print(">", .{});
-            },
-            .array => |v| {
-                try writer.print("[{} x ", .{v.elements});
-                try self.formatInner(writer, v.x);
-                try writer.print("]", .{});
-            },
-            .named => |v| try writer.print("%{s}", .{v.name}),
-            .function => |v| {
-                const map = &self.parser.lexer.token_map;
+        fn formatInner(self: _Fmt, writer: *Writer, type_id: TypeId) Writer.Error!void {
+            if (@intFromEnum(type_id) < TypeTable.index_offset) {
+                // writes the enum without the leading dot
+                try writer.print("{s}", .{std.enums.tagName(TypeId, type_id) orelse unreachable});
+                return;
+            }
 
-                try writer.print("define ", .{});
-                for (v.ret_attr) |attr| {
-                    try writer.print("{s}", .{attr.lit(map)});
-                    try writer.print(" ", .{});
-                }
-                try self.formatInner(writer, v.ret);
-
-                try writer.print(" (", .{});
-                for (v.args, v.attrs, 0..) |arg, attrs, i| {
-                    try self.formatInner(writer, arg);
-                    for (attrs) |attr| {
-                        try writer.print(" ", .{});
-                        try writer.print("{s}", .{attr.lit(map)});
+            const extra = self.parser.type_table.extra(type_id);
+            switch (extra) {
+                .integer => |v| try writer.print("i{}", .{v.bits}),
+                .@"struct" => |v| {
+                    try writer.print("{{ ", .{});
+                    for (v.xs, 0..) |x, i| {
+                        try self.formatInner(writer, x);
+                        if (i + 1 < v.xs.len) {
+                            try writer.print(", ", .{});
+                        }
                     }
-                    try writer.print(" %{}", .{i});
-                }
-                if (v.is_vararg) {
-                    try writer.print(", ...", .{});
-                }
-                try writer.print(")", .{});
-            },
+                    try writer.print(" }}", .{});
+                },
+                .vector => |v| {
+                    try writer.print("<{} x ", .{v.elements});
+                    try self.formatInner(writer, v.x);
+                    try writer.print(">", .{});
+                },
+                .array => |v| {
+                    try writer.print("[{} x ", .{v.elements});
+                    try self.formatInner(writer, v.x);
+                    try writer.print("]", .{});
+                },
+                .named => |v| try writer.print("%{s}", .{v.name}),
+                .function => |v| try v.formatWriter(writer, null, self.parser),
+            }
         }
-    }
-};
-
-pub fn FmtContext(parser: *const Parser, type_id: TypeId) _FmtContext {
-    return .{
-        .parser = parser,
-        .type_id = type_id,
     };
-}
 
-/// Just a `Token.Kind`.
-pub const TypeAttribute = Token.Kind;
+    pub fn Fmt(type_id: TypeId, parser: *const Parser) _Fmt {
+        return .{
+            .parser = parser,
+            .type_id = type_id,
+        };
+    }
+};
+
+/// Just a `Token`, extract names from the source if necessary.
+pub const TypeAttribute = Token;
+// TODO change this into a `Token.Kind`
 
 pub const IntegerType = struct {
     bits: u32,
@@ -117,6 +95,37 @@ pub const FunctionType = struct {
     attrs: [][]const TypeAttribute,
 
     is_vararg: bool,
+
+    pub fn formatWriter(self: FunctionType, writer: *Writer, optional_name: ?[]const u8, parser: *const Parser) Writer.Error!void {
+        try writer.print("define ", .{});
+        for (self.ret_attr) |attr| {
+            try writer.print("{s}", .{attr.loc.slice(parser.lexer.b)});
+            try writer.print(" ", .{});
+        }
+        try writer.print("{f}", .{self.ret.Fmt(parser)});
+
+        if (optional_name) |name| {
+            try writer.print(" @{s}(", .{name});
+        } else {
+            try writer.print(" (", .{});
+        }
+        for (self.args, self.attrs, 0..) |arg, attrs, i| {
+            try writer.print("{f}", .{arg.Fmt(parser)});
+            for (attrs) |attr| {
+                try writer.print(" ", .{});
+                try writer.print("{s}", .{attr.loc.slice(parser.lexer.b)});
+            }
+            try writer.print(" %{}", .{i});
+            if (i + 1 < self.args.len) {
+                try writer.print(", ", .{});
+            }
+        }
+        if (self.is_vararg) {
+            try writer.print(", ...", .{});
+        }
+        try writer.print(")", .{});
+        try writer.flush();
+    }
 };
 
 /// `name` is owned by TypeTable.

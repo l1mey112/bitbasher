@@ -24,6 +24,8 @@ pub const Token = struct {
         eof,
         integer_type,
 
+        newline,
+
         label_literal,
         integer_literal,
         float_literal,
@@ -169,12 +171,31 @@ pub const Token = struct {
         riscv_vector_cc,
         riscv_vls_cc,
         cc,
+
+        zeroinitializer,
         
         // Random other attributes
         unnamed_addr,
         local_unnamed_addr,
 
         // --- end_forget ---
+
+        trunc,
+        ptrtoint,
+        ptrtoaddr,
+        inttoptr,
+        bitcast,
+        addrspacecast,
+        getelementptr,
+        extractelement,
+        insertelement,
+        shufflevector,
+        add,
+        sub,
+        xor,
+
+        undef,
+        poison,
 
         // Parameter Attributes
         // https://llvm.org/docs/LangRef.html#parameter-attributes
@@ -196,13 +217,9 @@ pub const Token = struct {
         initializes,
         range,
         // align <n> or align(<n>)
-        @"align",        
-        
-        _,
+        @"align",
 
-        pub fn lit(kind: Kind, map: *const TokenMap) []const u8 {
-            return map.get(kind);
-        }
+        _,
 
         pub fn forgettable(kind: Kind) bool {
             return switch (@intFromEnum(kind)) {
@@ -224,8 +241,15 @@ pub const Token = struct {
         }
 
         pub fn isType(kind: Kind) bool {
-            return switch (kind) {
-                .@"void"....ptr => true,
+            return switch (@intFromEnum(kind)) {
+                @intFromEnum(Kind.@"void")...@intFromEnum(Kind.ptr) => true,
+                else => false,
+            };
+        }
+
+        pub fn isConstantInstruction(kind: Kind) bool {
+            return switch (@intFromEnum(kind)) {
+                @intFromEnum(Kind.trunc)...@intFromEnum(Kind.xor) => true,
                 else => false,
             };
         }
@@ -237,6 +261,13 @@ pub const Token = struct {
 
         pub fn slice(self: Loc, buffer: [:0]const u8) []const u8 {
             return buffer[self.start..self.end];
+        }
+
+        pub fn sliceAlloc(self: Loc, allocator: Allocator, buffer: [:0]const u8) ![]const u8 {
+            const str = self.slice(buffer);
+            const dup = try allocator.dupe(u8, str);
+            errdefer allocator.free(dup);
+            return dup;
         }
 
         pub fn sliceUnescape(self: Loc, allocator: Allocator, buffer: [:0]const u8) ![]const u8 {
@@ -329,7 +360,15 @@ fn adv0(self: *Lexer) u8 {
     return self.adv() orelse 0;
 }
 
+pub fn nextLf(self: *Lexer, allocator: Allocator) !Token {
+    return self.nextInner(allocator, true);
+}
+
 pub fn next(self: *Lexer, allocator: Allocator) !Token {
+    return self.nextInner(allocator, false);
+}
+
+pub fn nextInner(self: *Lexer, allocator: Allocator, emit_newline: bool) !Token {
     while (true) {
         const err: Token = .{
             .kind = .err,
@@ -341,8 +380,14 @@ pub fn next(self: *Lexer, allocator: Allocator) !Token {
             '_', 'a'...'z', 'A'...'Z' => {
                 return try self.lexIdentifier(allocator);
             },
+            '\n' => {
+                if (emit_newline) {
+                    return self.single(.newline);
+                }
+                continue;
+            },
             // ignore whitespace
-            0, ' ', '\t', '\n', '\r' => {
+            0, ' ', '\t', '\r' => {
                 continue;
             },
             // will not support floating point constants starting with `+`
@@ -433,6 +478,11 @@ fn isLabelChar(ch : u8) bool {
     };
 }
 
+// allow identifiers like :: from rust in this. this is not mentioned anywhere in the spec
+fn isDoubleColon(self: *Lexer, idx: usize) bool {
+    return self.b[idx] == ':' and self.b[idx + 1] == ':' and isLabelChar(self.b[idx + 2]);
+}
+
 fn lexIdentifier(self: *Lexer, allocator: Allocator) !Token {
     // "Lex a label, integer type, keyword, or hexadecimal integer constant."
     //    Label           [-a-zA-Z$._0-9]+:
@@ -467,8 +517,16 @@ fn lexIdentifier(self: *Lexer, allocator: Allocator) !Token {
         }
     }
 
-    while (isLabelChar(self.b[self.idx])) {
-        self.idx += 1;
+    while (true) {
+        if (isLabelChar(self.b[self.idx])) {
+            self.idx += 1;
+        } else if (self.isDoubleColon(self.idx)) {
+            // "::c"
+            //  ^^^
+            self.idx += 2;
+        } else {
+            break;
+        }
     }
 
     // "When false (default), an identifier ending in ':' is a label token."
@@ -478,7 +536,8 @@ fn lexIdentifier(self: *Lexer, allocator: Allocator) !Token {
     // we can just assume the default, we don't need the other one
 
     if (self.b[self.idx] == ':') {
-        loc.end = self.idx + 1;
+        loc.end = self.idx;
+        self.idx += 1;
         return .{ .kind = .label_literal, .loc = loc };
     }
     
@@ -597,8 +656,16 @@ fn readVarName(self: *Lexer, varKind: Token.Kind) ?Token {
 
     if (isVarSpecial(self.b[self.idx]) or ascii.isAlphabetic(self.b[self.idx])) {
         self.idx += 1;
-        while (isVarSpecial(self.b[self.idx]) or ascii.isAlphanumeric(self.b[self.idx])) {
-            self.idx += 1;
+        while (true) {
+            if (isVarSpecial(self.b[self.idx]) or ascii.isAlphanumeric(self.b[self.idx])) {
+                self.idx += 1;
+            } else if (self.isDoubleColon(self.idx)) {
+                // "::c"
+                //  ^^^
+                self.idx += 2;
+            } else {
+                break;
+            }
         }
         loc.end = self.idx;
         return .{ .loc = loc, .kind = varKind };
@@ -838,57 +905,6 @@ fn lexHash(self: *Lexer) Token {
     return .{ .kind = .hash, .loc = loc };
 }
 
-// fn lexPositive(self: *Lexer) Token {
-//     var loc: Token.Loc = .{
-//         .start = self.idx - 1,
-//         .end = undefined,
-//     };
-//
-//     // "If the letter after the negative is a number, this is probably not a label."
-//     if (!ascii.isDigit(self.b[self.idx])) {
-//         loc.end = self.idx + 1;
-//         return .{ .kind = .err, .loc = loc };
-//     }
-//
-//     // "Skip digits"
-//     self.idx += 1;
-//     while (ascii.isDigit(self.b[self.idx])) {
-//         self.idx += 1;
-//     }
-//
-//     // "At this point, we need a '.'."
-//     if (self.b[self.idx] != '.') {
-//         loc.end = self.idx + 1;
-//         return .{ .kind = .err, .loc = loc };
-//     }
-//     self.idx += 1;
-//
-//     // "Skip over [0-9]*([eE][-+]?[0-9]+)?"
-//     while (ascii.isDigit(self.b[self.idx])) {
-//         self.idx += 1;
-//     }
-//
-//     if (self.b[self.idx] == 'e' or self.b[self.idx] == 'E') {
-//         if (ascii.isDigit(self.b[self.idx + 1]) or
-//             (
-//                 (self.b[self.idx + 1] == '-' or self.b[self.idx + 1] == '+') and
-//                 ascii.isDigit(self.b[self.idx + 1])
-//             )
-//         ) {
-//             self.idx += 2;
-//             while (ascii.isDigit(self.b[self.idx])) {
-//                 self.idx += 1;
-//             }
-//         }
-//     }
-//
-//     loc.end = self.idx;
-//     return .{
-//         .kind = .float,
-//         .loc = loc,
-//     };
-// }
-
 fn hexDigitToInt(c: u8) u8 {
     return switch (c) {
         '0'...'9' => c - '0',
@@ -949,6 +965,9 @@ test "simple" {
         .{ .id = .{ .local_var_id, "1" } }, .{ .id = .{ .equal, null } }, .{ .lit = "alloca" }, .{ .id = .{ .integer_type, "i32" } },
         //
         .{ .lit = "br" }, .{ .lit = "label" }, .{ .id = .{ .local_var_id, "2" } },
+        //
+        .{ .id = .{ .label_literal, "fart" } },
+        //
         .{ .id = .{ .label_literal, "3" } }, .{ .id = .{ .label_literal, "2" } },
         .{ .id = .{ .label_literal, "-4" } }, .{ .id = .{ .label_literal, "-erm" } }, .{ .id = .{ .label_literal, ".label" } }, .{ .id = .{ .label_literal, "..erm..label" } },
             .{ .id = .{ .dotdotdot, null } },
@@ -977,6 +996,8 @@ test "simple" {
         \\; Implicit entry label. Not printed on output.
         \\  %1 = alloca i32
         \\  br label %2
+        \\
+        \\fart:
         \\
         \\3: ; Explicit numeric label
         \\"2": ; string label, quoted number

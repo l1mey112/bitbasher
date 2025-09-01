@@ -10,9 +10,11 @@ const TypeAttribute = llvm_types.TypeAttribute;
 const Token = Lexer.Token;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
-const FmtContext = llvm_types.FmtContext;
 
 const Function = llvm_module.Function;
+const PseudoArgument = llvm_module.PseudoArgument;
+const Inst = llvm_module.Inst;
+const BasicBlock = llvm_module.BasicBlock;
 const ModuleObject = llvm_module.ModuleObject;
 
 const Parser = @This();
@@ -29,6 +31,7 @@ type_table: TypeTable,
 module_objects: std.StringHashMapUnmanaged(*ModuleObject),
 
 has_init: bool,
+lf_aware: bool,
 
 pub fn init(buffer: [:0]const u8, allocator: Allocator) Parser {
     return .{
@@ -42,6 +45,7 @@ pub fn init(buffer: [:0]const u8, allocator: Allocator) Parser {
         .module_objects = .empty,
         
         .has_init = false,
+        .lf_aware = false,
     };
 }
 
@@ -51,8 +55,9 @@ pub fn deinit(self: *Parser) void {
 
     var iter = self.module_objects.iterator();
     while (iter.next()) |ent| {
-        self.allocator.free(ent.key_ptr.*);
-        ent.value_ptr.*.deinit(self.allocator);
+        // no need to free the key, because the memory is shared with the Function
+        // self.allocator.free(ent.key_ptr.*);
+        ent.value_ptr.*.deinitSelf(self.allocator);
     }
     self.module_objects.deinit(self.allocator);
 }
@@ -64,24 +69,38 @@ const ParserError = error{
     // but you'd need to throw away the function for some
     LexerError,
     NoSummaryEntry,
-    NoMetadataInDeclare,
     NoTypedPointers,
     NoStringAttribute,
     NoPrefixOrPrologue,
     NoPersonality,
     NoGC,
+    NoHashDebugRecords,
     
     ExpectedToken,
     UnExpectedToken,
 };
 
-fn nextTok(self: *Parser) !void {
+fn nextTokInner(self: *Parser, emit_newline: bool) !void {
+
     self.tok = self.peek;
-    self.peek = try self.lexer.next(self.allocator);
+    self.peek = try self.lexer.nextInner(self.allocator, emit_newline);
+
+    // will remove newlines
+    if (self.tok.kind == .newline and !emit_newline) {
+        self.tok = self.peek;
+        self.peek = try self.lexer.nextInner(self.allocator, false);
+    }
+    if (!emit_newline) {
+        assert(self.tok.kind != .newline);
+    }
 
     if (self.tok.kind == .err) {
         return ParserError.LexerError;
     }
+}
+
+fn nextTok(self: *Parser) !void {
+    return self.nextTokInner(self.lf_aware);
 }
 
 /// Ignores tokens right until and skips `kind`.
@@ -150,6 +169,7 @@ pub fn next(self: *Parser) !?void {
             .source_filename => try self.ignoreUntilSkip(.string_constant),
 
             .declare => try self.parseDeclare(),
+            .define => try self.parseDefine(),
 
             else => return ParserError.UnExpectedToken,
         }
@@ -159,25 +179,64 @@ pub fn next(self: *Parser) !?void {
 fn parseDeclare(self: *Parser) !void {
     try self.nextTok();
 
-    // TODO will not support or attempt to skip metadata attachements on declare
-    if (self.tok.kind == .metadata_var) {
-        return ParserError.NoMetadataInDeclare;
-    }
+    // "parseOptionalFunctionMetadata"
+    try self.skipMetadata();
+    var f = try self.parseFunctionHeader();
+    errdefer f.deinit(self.allocator);
 
-    const func = try self.parseFunctionHeader();
-
-    const name = try self.allocator.dupe(u8, func.name.loc.slice(self.lexer.b));
-    errdefer self.allocator.free(name);
-
-    const gop = try self.module_objects.getOrPut(self.allocator, name);
+    const gop = try self.module_objects.getOrPut(self.allocator, f.name);
     if (!gop.found_existing) {
         const obj = try self.allocator.create(ModuleObject);
         errdefer self.allocator.free(obj);
 
-        obj.* = .{ .function = func };
+        obj.* = .{ .function = f };
+        gop.value_ptr.* = obj;
+    }
+}
+
+fn parseDefine(self: *Parser) !void {
+    try self.nextTok();
+
+    var f = try self.parseFunctionHeader();
+    errdefer f.deinit(self.allocator);
+    
+    // "parseOptionalFunctionMetadata"
+    try self.skipMetadata();
+
+    // "parseFunctionBody"
+    //   ::= '{' BasicBlock+ UseListOrderDirective* '}'
+    //       ^^^
+    try self.expect(.lbrace);
+
+    self.lf_aware = true;
+
+    var first = true;
+    while (self.tok.kind != .rbrace) {
+        try self.parseBasicBlock(&f, first);
+        first = false;
+    }
+
+    self.lf_aware = false;
+    try self.nextTok();
+
+    const gop = try self.module_objects.getOrPut(self.allocator, f.name);
+    if (!gop.found_existing) {
+        const obj = try self.allocator.create(ModuleObject);
+        errdefer self.allocator.free(obj);
+
+        obj.* = .{ .function = f };
         gop.value_ptr.* = obj;
     } else {
-        self.allocator.free(name);
+        var new_f = &gop.value_ptr.*.function;
+        new_f.bbs.deinit(self.allocator);
+        new_f.bbs = f.bbs.move();
+        f.deinit(self.allocator);
+    }
+}
+
+fn skipMetadata(self: *Parser) !void {
+    while (self.tok.kind == .metadata_var) {
+        try self.nextTok();
     }
 }
 
@@ -216,6 +275,7 @@ fn parseFunctionHeader(self: *Parser) !Function {
         // unnamed_addr, local_unnamed_addr, gc
         try self.nextTok();
     }
+    // "parseFnAttributeValuePairs"
     const function_attrs = try self.parseOptionalAttrs();
     while (true) {
         // [align N]
@@ -233,19 +293,23 @@ fn parseFunctionHeader(self: *Parser) !Function {
         }
     }
 
+    const dup = try name.loc.sliceAlloc(self.allocator, self.lexer.b);
+    errdefer self.allocator.free(dup);
+
     return .{
-        .name = name,
+        .name = dup,
         .type_id = type_id,
         .arg_names = arg_names,
-        .function_attrs = function_attrs,
+        .function_attrs = .{ .attrs = function_attrs },
+        .bbs = .empty,
     };
 }
 
-const AnchorErrorSet = ParserError
+const ParseTypeAnchorErrorSet = ParserError
     || error{OutOfMemory}
     || error{Overflow, InvalidCharacter};
 
-fn parseType(self: *Parser) AnchorErrorSet!TypeId {
+fn parseType(self: *Parser) ParseTypeAnchorErrorSet!TypeId {
     const skipReturn = struct {
         inline fn skipReturn(s: *Parser, type_id: TypeId) !TypeId {
             try s.nextTok();
@@ -254,7 +318,7 @@ fn parseType(self: *Parser) AnchorErrorSet!TypeId {
     }.skipReturn;
     
     var result: TypeId = blk: switch (self.tok.kind) {
-        // cannot and will not support
+        // cannot and will not support. will support label separately
         .metadata, .token, .label => try skipReturn(self, .invalid_type),
         .@"void" => try skipReturn(self, .@"void"),
         .half => try skipReturn(self, .half),
@@ -333,6 +397,9 @@ fn parseType(self: *Parser) AnchorErrorSet!TypeId {
         // Types '(' ArgTypeListI ')' OptFuncAttrs
         .lparen => {
             result, const arg_names = try self.parseFunctionType(result, &[0]TypeAttribute{});
+            for (arg_names) |xs| {
+                self.allocator.free(xs);
+            }
             self.allocator.free(arg_names); // we don't need these
         },
 
@@ -348,7 +415,7 @@ fn parseOptionalAttrs(self: *Parser) ![]const TypeAttribute {
     // "Parse a potentially empty list of parameter or return attributes."
 
     // this is supposed to be a set, but it doesn't matter and unlikely has duplicated elements
-    var xs: std.ArrayList(Token.Kind) = .empty;
+    var xs: std.ArrayList(TypeAttribute) = .empty;
     defer xs.deinit(self.allocator);
 
     // https://llvm.org/docs/LangRef.html#parameter-attributes
@@ -399,7 +466,7 @@ fn parseOptionalAttrs(self: *Parser) ![]const TypeAttribute {
         }
         
         // identifiers and group ids #1
-        try xs.append(self.allocator, self.tok.kind);
+        try xs.append(self.allocator, self.tok);
         try self.nextTok();
     }
 
@@ -407,7 +474,7 @@ fn parseOptionalAttrs(self: *Parser) ![]const TypeAttribute {
 }
 
 /// Parse the function type, given the return type is already parsed.
-fn parseFunctionType(self: *Parser, ret_type: TypeId, ret_attr: []const TypeAttribute) !struct { TypeId, []const Token } {
+fn parseFunctionType(self: *Parser, ret_type: TypeId, ret_attr: []const TypeAttribute) !struct { TypeId, [][]const u8 } {
     // Types '(' ArgTypeListI ')' OptFuncAttrs
     //       ^^^
     assert(self.tok.kind == .lparen);
@@ -428,8 +495,13 @@ fn parseFunctionType(self: *Parser, ret_type: TypeId, ret_attr: []const TypeAttr
         arg_attrs.deinit(self.allocator);
     }
 
-    var arg_names: ArrayList(Token) = .empty;
+    var arg_names: ArrayList([]const u8) = .empty;
     defer arg_names.deinit(self.allocator);
+    errdefer {
+        for (arg_names.items) |xs| {
+            self.allocator.free(xs);
+        }
+    }
 
     var is_invalid_type = false;
     var is_vararg = false;
@@ -465,7 +537,11 @@ fn parseFunctionType(self: *Parser, ret_type: TypeId, ret_attr: []const TypeAttr
         //                           ^^
         if (self.tok.kind == .local_var or self.tok.kind == .local_var_id) {
             // we assume that a function type either has all arguments, or none at all
-            try arg_names.append(self.allocator, self.tok);
+            const dup = try self.tok.loc.sliceAlloc(self.allocator, self.lexer.b);
+            errdefer self.allocator.free(dup);
+            
+            try arg_names.append(self.allocator, dup);
+            try self.nextTok();
         }
 
         try args.append(self.allocator, type_id);
@@ -478,7 +554,7 @@ fn parseFunctionType(self: *Parser, ret_type: TypeId, ret_attr: []const TypeAttr
     }
 
     if (is_invalid_type) {
-        return .{ .invalid_type, &[0]Token{} };
+        return .{ .invalid_type, &[0][]const u8{} };
     }
 
     const function_type = try self.type_table.intern(self.allocator, .{
@@ -505,6 +581,7 @@ fn parseStructType(self: *Parser) !TypeId {
     //     ::= '<' '{' Type (',' Type)* '}' '>'
 
     assert(self.tok.kind == .lbrace);
+    
     var xs: ArrayList(TypeId) = try .initCapacity(self.allocator, 4);
     defer xs.deinit(self.allocator);
 
@@ -526,9 +603,7 @@ fn parseStructType(self: *Parser) !TypeId {
             try xs.append(self.allocator, type_id);
         }
     }
-
     try self.expect(.rbrace);
-    try self.nextTok();
 
     const struct_type_id = try self.type_table.intern(self.allocator, .{
         .@"struct" = .{
@@ -602,13 +677,407 @@ fn parseArrayVectorType(self: *Parser) !TypeId {
     }
 }
 
+// %X = call i32 asm "bswap $0", "=r,r"(i32 %Y)
+
+// %a = load i8, ptr %x, align 1, !range !0 ; Can only be 0 or 1
+// %b = load i8, ptr %y, align 1, !range !1 ; Can only be 255 (-1), 0 or 1
+// %e = load <2 x i8>, ptr %x, !range 0 ; Can only be <0 or 1, 0 or 1>
+
+// ret i32 5                       ; Return an integer value of 5
+// ret void                        ; Return from a void function
+// ret { i32, i8 } { i32 4, i8 2 } ; Return a struct of values 4 and 2
+
+// <result> = add <ty> <op1>, <op2>          ; yields ty:result
+// <result> = add nuw <ty> <op1>, <op2>      ; yields ty:result
+// <result> = add nsw <ty> <op1>, <op2>      ; yields ty:result
+// <result> = add nuw nsw <ty> <op1>, <op2>  ; yields ty:result
+
+// switch <intty> <value>, label <defaultdest> [ <intty> <val>, label <dest> ... ]
+// <result> = phi [fast-math-flags] <ty> [ <val0>, <label0>], ...
+//
+//                ^^^^^ check if this is a type first, then eat random tokens until this is a type
+
+// ; Function Attrs: noinline nounwind optnone sspstrong uwtable
+// define internal ptr @sqlite3Pcache1Mutex() #0 {
+//     %1 = load ptr, ptr getelementptr inbounds nuw (%struct.PCacheGlobal, ptr @pcache1_g, i32 0, i32 9), align 8
+//     ret ptr %1
+// }
+
+// <result> = udiv exact <ty> <op1>, <op2>   ; yields ty:result
+
+// TODO
+// (type, constant), then after that, many constants
+// assume [ ... ] isn't an array constant. the only instruction that uses this is landingpad
+//        ^^^^^^^ turn this into a proper pseudo argument
+
+const PseudoParserContext = struct {
+    // %const.0 for unwrapping constant expressions
+    reserved_counter: u32,
+    insts: std.ArrayList(Inst),
+};
+
+fn pseudoIsTypeBegin(kind: Token.Kind) bool {
+    // `label %0` parsed separately, [ ... ] is never parsed as types
+    
+    return switch (kind) {
+        .integer_type => true,
+        .lbrace, .less, .lsquare => true,
+        else => kind.isType(),
+    };
+}
+
+fn parseVectorStructCallListLiteral(self: *Parser, ctx: *PseudoParserContext) !PseudoArgument {
+    const gate: Token.Kind = switch (self.tok.kind) {
+        .lbrace => .rbrace,
+        .less => .greater,
+        .lparen => .rparen,
+        else => unreachable,
+    };
+
+    var args: std.ArrayList(PseudoArgument.PseudoPair) = try .initCapacity(self.allocator, 2);
+    defer args.deinit(self.allocator);
+    errdefer {
+        for (args.items) |arg| {
+            arg.arg.deinit(self.allocator);
+        }
+    }
+
+
+    try self.nextTok();
+    while (true) {
+        const type_id = try self.parseType();
+
+        // eat the attributes we don't care about
+        // (ptr noundef %169)
+        // (ptr align 8 @alloc_669)
+        if (self.tok.kind.isAttributesAndBeyond()) {
+            const attrs = try self.parseOptionalAttrs();
+            self.allocator.free(attrs); // we don't need these
+        }
+        
+        {
+            const arg = try self.parsePseudoArgument(true, ctx);
+            // errdefer shouldn't apply after the append
+            errdefer arg.deinit(self.allocator);
+            try args.append(self.allocator, .{ .type_id = type_id, .arg = arg });
+        }
+        if (self.tok.kind == gate) {
+            try self.nextTok();
+            break;
+        } else {
+            try self.expect(.comma);
+        }
+    }
+
+    const args_owned = try args.toOwnedSlice(self.allocator);
+
+    if (gate == .rbrace) {
+        // struct    
+        return .{ .struct_literal = args_owned };
+    } else if (gate == .less) {
+        // vector
+        return .{ .vector_literal = args_owned };
+    } else {
+        // call list
+        return .{ .call_list = args_owned };
+    }
+}
+
+fn parseListLiteral(self: *Parser, ctx: *PseudoParserContext) !PseudoArgument {
+    assert(self.tok.kind == .lsquare);
+
+    var args: std.ArrayList(PseudoArgument) = try .initCapacity(self.allocator, 2);
+    defer args.deinit(self.allocator);
+    errdefer {
+        for (args.items) |arg| {
+            arg.deinit(self.allocator);
+        }
+    }
+
+    while (self.tok.kind != .rsquare) {
+        var next_type = true;
+
+        while (self.tok.kind != .comma and self.tok.kind != .rsquare) {
+            const is_type = pseudoIsTypeBegin(self.tok.kind);
+
+            const arg = try self.parsePseudoArgument(!next_type, ctx);
+            errdefer arg.deinit(self.allocator);
+            try args.append(self.allocator, arg);
+
+            if (is_type) {
+                next_type = false;
+            }
+        }
+        if (self.tok.kind == .comma) {
+            try self.nextTok();
+        }
+    }
+    try self.nextTok();
+
+    return .{ .list = try args.toOwnedSlice(self.allocator) };
+}
+
+const ParsePseudoArgumentAnchorErrorSet = ParserError
+    || error{Overflow, InvalidCharacter}
+    || error{OutOfMemory};
+
+fn parsePseudoArgument(self: *Parser, not_type: bool, ctx: *PseudoParserContext) ParsePseudoArgumentAnchorErrorSet!PseudoArgument {
+    if (self.tok.kind.isConstantInstruction()) {
+        const idx = ctx.reserved_counter;
+        ctx.reserved_counter += 1;
+
+        const inner_lhs = try std.fmt.allocPrint(self.allocator, "const.{}", .{idx});
+        errdefer self.allocator.free(inner_lhs);
+        
+        try self.parseInstruction(inner_lhs, ctx);
+        return .{ .local_var = inner_lhs };
+    }
+
+    if (self.tok.kind == .lparen) {
+        return try self.parseVectorStructCallListLiteral(ctx);
+    }
+
+    // structs or vector literals, but only after a type has been parsed
+    if (not_type and (self.tok.kind == .lbrace or self.tok.kind == .less or self.tok.kind == .lsquare)) {
+        if (self.tok.kind == .lsquare) {
+            return try self.parseListLiteral(ctx);
+        } else {
+            return try self.parseVectorStructCallListLiteral(ctx);
+        }
+    } else if (pseudoIsTypeBegin(self.tok.kind)) {
+        const type_id = try self.parseType();
+        return .{ .type_id = type_id };
+    }
+
+    if (self.tok.kind == .local_var or self.tok.kind == .local_var_id) {
+        const str = self.tok.loc.slice(self.lexer.b);
+
+        // this is a type, assuming that `llvm-dis` puts all the types at the top, functions at the bottom
+        const arg: PseudoArgument = if (self.type_table.named_types.get(str)) |type_entry| blk: {
+            // at this point, no type should be an empty forward declaration
+            _ = type_entry orelse unreachable;
+            const type_id = try self.type_table.intern(self.allocator, .{ .named = .{ .name = str } });
+            break :blk .{ .type_id = type_id };
+        } else blk: {
+            // this is a normal variable
+            const dup = try self.allocator.dupe(u8, str);
+            break :blk .{ .local_var = dup };
+        };
+        errdefer arg.deinit(self.allocator);
+        try self.nextTok();
+        return arg;
+    }
+
+    // label %0
+    if (self.tok.kind == .label) {
+        try self.nextTok();
+        const token = self.tok;
+        if (self.tok.kind != .local_var and self.tok.kind != .local_var_id) {
+            return ParserError.ExpectedToken;
+        }
+
+        const dup = try token.loc.sliceAlloc(self.allocator, self.lexer.b);
+        errdefer self.allocator.free(dup);
+        try self.nextTok();
+        return .{ .label = dup };
+    }
+
+    const final_pseudo: PseudoArgument = switch (self.tok.kind) {
+        .undef => .undef,
+        .poison => .poison,
+        .zeroinitializer => .zeroinitializer,
+        .integer_literal => blk: {
+            const dup = try self.tok.loc.sliceAlloc(self.allocator, self.lexer.b);
+            break :blk .{ .integer_literal = dup };
+        },
+        .float_literal => blk: {
+            const dup = try self.tok.loc.sliceAlloc(self.allocator, self.lexer.b);
+            break :blk .{ .float_literal = dup };
+        },
+        .hex_float_literal => blk: {
+            const dup = try self.tok.loc.sliceAlloc(self.allocator, self.lexer.b);
+            break :blk .{ .hex_float_literal = dup };
+        },
+        .global_id, .global_var => blk: {
+            const dup = try self.tok.loc.sliceAlloc(self.allocator, self.lexer.b);
+            break :blk .{ .global_var = dup };
+        },
+        else => .{ .token = self.tok.kind },
+    };
+    errdefer final_pseudo.deinit(self.allocator);
+    try self.nextTok();
+    return final_pseudo;
+}
+
+fn parseInstruction(self: *Parser, lhs: ?[]const u8, ctx: *PseudoParserContext) !void {
+    const inst_kind = self.tok.kind;
+    try self.nextTok();
+
+    // var inst: Inst = .{
+    //     .lhs = lhs,
+    //     .kind = inst_kind,
+    //     .args = 
+    // };
+
+    var pseudos: std.ArrayList(PseudoArgument) = try .initCapacity(self.allocator, 3);
+    defer pseudos.deinit(self.allocator);
+    errdefer {
+        for (pseudos.items) |arg| {
+            arg.deinit(self.allocator);
+        }
+    }
+
+    // %x = i32 0 is not possible, it is always instruction first
+
+    // <result> = mul <ty> <op1>, <op2>
+    // getelementptr inbounds nuw (%struct.PCacheGlobal, ptr @pcache1_g, i32 0, i32 9)
+    //     ^ constant expression
+
+    // walk and collect tokens
+    while (self.tok.kind.isAttributesAndBeyond()) {
+        try pseudos.append(self.allocator, .{ .token = self.tok.kind });
+        try self.nextTok();
+    }
+
+    // inside constant expression
+    // https://llvm.org/docs/LangRef.html#constant-expressions
+    const is_inner = self.tok.kind == .lparen;
+    if (is_inner) {
+        // we need a result location
+        assert(lhs != null);
+        try self.nextTok();
+    }
+
+    var first_type = true;
+    
+    while (true) {
+        if (is_inner and self.tok.kind == .rparen) {
+            try self.nextTok();
+            break;
+        } else if (!is_inner and self.tok.kind == .newline) {
+            try self.nextTok();
+            break;
+        }
+        assert(self.tok.kind != .eof);
+
+        if (self.tok.kind == .comma) {
+            try self.nextTok();
+        }
+
+        const was_type = pseudoIsTypeBegin(self.tok.kind);
+
+        const arg = try self.parsePseudoArgument(!first_type, ctx);
+        errdefer arg.deinit(self.allocator);
+        try pseudos.append(self.allocator, arg);
+
+        if (was_type) {
+            // <ty> <op>
+            first_type = false;
+        }
+    }
+
+    const inst: Inst = .{
+        .lhs = lhs,
+        .kind = inst_kind,
+        .args = try pseudos.toOwnedSlice(self.allocator),
+    };
+    errdefer inst.deinit(self.allocator);
+    try ctx.insts.append(self.allocator, inst);
+}
+
+fn parseBasicBlock(self: *Parser, f: *Function, first: bool) !void {
+    // "parseBasicBlock"
+    //   ::= (LabelStr|LabelID)? Instruction*
+
+    // the first basic block cannot have precedessors
+    var label_name: []const u8 = undefined;
+    if (first and self.tok.kind != .label_literal) {
+        label_name = try self.allocator.dupe(u8, "start");
+    } else {
+        label_name = try self.tok.loc.sliceAlloc(self.allocator, self.lexer.b);
+        errdefer self.allocator.free(label_name);
+        try self.expect(.label_literal);
+    }
+    errdefer self.allocator.free(label_name);
+
+    var ctx: PseudoParserContext = .{
+        .insts = try .initCapacity(self.allocator, 4),
+        .reserved_counter = 0,
+    };
+    errdefer ctx.insts.deinit(self.allocator);
+    errdefer {
+        for (ctx.insts.items) |inst| {
+            inst.deinit(self.allocator);
+        }
+    }
+
+    while (true) {
+        // https://llvm.org/docs/LangRef.html#debugrecords
+        //
+        //     %inst1 = op1 %a, %b
+        //       #dbg_value(%inst1, !10, !DIExpression(), !11)
+        //     %inst2 = op2 %inst1, %c
+        //
+        if (self.tok.kind == .hash) {
+            return ParserError.NoHashDebugRecords;
+        }
+
+        while (self.tok.kind == .newline) {
+            try self.nextTok();
+        }
+
+        // ?[]const u8
+        const lhs = if (self.tok.kind == .local_var or self.tok.kind == .local_var_id) blk: {
+            const curr = self.tok;
+
+            const dup = try curr.loc.sliceAlloc(self.allocator, self.lexer.b);
+            errdefer self.allocator.free(dup);
+            
+            try self.nextTok();
+            try self.expect(.equal);
+            break :blk dup;
+        } else null;
+        // we want `.newline` tokens from now on, hence the usage of `*Lf` functions.
+        // LLVM has many instructions, i value my time, so im just going to use a
+        // newline aware lazy way of parsing.
+        //
+        // note that `llvm-naive` assumes input that is the output of `llvm-dis`
+
+        // %0 = inst
+        //      ^^^^
+        //
+        // unreachable [\n]
+        // ^^^^^^^^^^^
+
+        // walk until we have a newline, then this is the entire instruction
+
+        // among some of the instructions that don't terminate in a newline, like
+        // switch ... [], we can just match until. instructions like `phi`, no matter
+        // how long it gets, `llvm-dis` will always output it all on one line
+        try self.parseInstruction(lhs, &ctx);
+
+        while (self.tok.kind == .newline) {
+            try self.nextTok();
+        }
+        if (self.tok.kind == .label_literal or self.tok.kind == .rbrace) {
+            break;
+        }
+    }
+
+    const bb: BasicBlock = .{
+        .name = label_name,
+        .insts = ctx.insts,
+    };
+
+    try f.bbs.put(self.allocator, bb.name, bb);
+}
+
 test "declare" {
     const allocator = std.testing.allocator;
     const expectEqualStrings = std.testing.expectEqualStrings;
-    const expectEqualSlices = std.testing.expectEqualSlices;
 
     const buffer =
-        \\declare signext i8 @puts(ptr noalias captures(none), ...) nounwind
+        \\declare signext i8 @puts(ptr noalias captures(none), ...) nounwind #0
     ;
 
     var parser = Parser.init(buffer, allocator);
@@ -627,13 +1096,111 @@ test "declare" {
     const obj = parser.module_objects.get("puts") orelse unreachable;
     const function = &obj.function;
 
-    const nounwind_ident = try parser.lexer.token_map.intern(allocator, "nounwind");
+    const attr_repr = try std.fmt.allocPrint(allocator, "{f}", .{function.function_attrs.Fmt(&parser)});
+    defer allocator.free(attr_repr);
 
-    try expectEqualStrings("puts", function.name.loc.slice(buffer));
-    try expectEqualSlices(TypeAttribute, &[_]TypeAttribute{ nounwind_ident }, function.function_attrs);
+    try expectEqualStrings("puts", function.name);
+    try expectEqualStrings("nounwind #0", attr_repr);
 
-    const function_repr = try std.fmt.allocPrint(allocator, "{f}", .{FmtContext(&parser, function.type_id)});
-    defer allocator.free(function_repr);
+    const type_repr = try std.fmt.allocPrint(allocator, "{f}", .{function.type_id.Fmt(&parser)});
+    defer allocator.free(type_repr);
 
-    try expectEqualStrings("define signext i8 (ptr noalias %0, ...)", function_repr);
+    try expectEqualStrings("define signext i8 (ptr noalias %0, ...)", type_repr);
 }
+
+fn testPieces(pieces: []const []const u8, buf: []const u8) !void {
+    for (pieces) |piece| {
+        errdefer {
+            std.debug.print("couldn't find \"{s}\"\n", .{piece});
+        }
+        try std.testing.expect(std.mem.containsAtLeast(u8, buf, 1, piece));
+    }
+}
+
+test "square" {
+    const allocator = std.testing.allocator;
+
+    const buffer =
+        \\define i32 @square(i32 %num) unnamed_addr {
+        \\start:
+        \\  %num.dbg.spill = alloca [4 x i8], align 4
+        \\  store i32 %num, ptr %num.dbg.spill, align 4
+        \\  %0 = call { i32, i1 } @llvm.smul.with.overflow.i32(i32 %num, i32 %num)
+        \\  %_2.0 = extractvalue { i32, i1 } %0, 0
+        \\  %_2.1 = extractvalue { i32, i1 } %0, 1
+        \\  br i1 %_2.1, label %panic, label %bb1
+        \\
+        \\bb1:
+        \\  ret i32 %_2.0
+        \\
+        \\panic:
+        \\  call void @core::panicking::panic_const::panic_const_mul_overflow(ptr align 8 @alloc_669) #3
+        \\  unreachable
+        \\}
+        \\
+        \\declare { i32, i1 } @llvm.smul.with.overflow.i32(i32, i32) #1
+        \\
+        \\declare void @core::panicking::panic_const::panic_const_mul_overflow(ptr align 8) unnamed_addr #2
+    ;
+
+    var parser = Parser.init(buffer, allocator);
+    defer parser.deinit();
+
+    {
+        errdefer {
+            std.debug.print("{s}\n", .{buffer});
+            std.debug.print("curr {}\n", .{parser.tok});
+            std.debug.print("peek {}\n", .{parser.peek});
+
+            // seen up to
+
+            std.debug.print("{s}\n", .{buffer[parser.tok.loc.start..]});
+        }
+        while (try parser.next()) |_| {
+            // something
+        }
+    }
+
+    const pieces = [_][]const u8{
+        "%num.dbg.spill = alloca [type [4 x i8]], align, 4",
+        "store [type i32], %num, [type ptr], %num.dbg.spill, align, 4",
+        "%0 = call [type { i32, i1 }], @llvm.smul.with.overflow.i32, (i32 %num, i32 %num)",
+        "br [type i1], %_2.1, label %panic, label %bb1",
+        "panic:",
+        "call [type void], @core::panicking::panic_const::panic_const_mul_overflow, (ptr @alloc_669)",
+        "unreachable",
+        //
+        "define { i32, i1 } @llvm.smul.with.overflow.i32",
+    };
+
+    var alloc_writer: std.Io.Writer.Allocating = .init(allocator);
+    defer alloc_writer.deinit();
+    const writer = &alloc_writer.writer;
+
+    const square = parser.module_objects.get("square") orelse unreachable;
+    try square.function.formatWriter(writer, &parser);
+
+    const llvm0 = parser.module_objects.get("llvm.smul.with.overflow.i32") orelse unreachable;
+    try llvm0.function.formatWriter(writer, &parser);
+
+    const core0 = parser.module_objects.get("core::panicking::panic_const::panic_const_mul_overflow") orelse unreachable;
+    try core0.function.formatWriter(writer, &parser);
+
+    try testPieces(&pieces, alloc_writer.written());
+}
+
+// test "amalgamation" {
+//     const allocator = std.testing.allocator;
+
+//     const buffer = @embedFile("./test/sqlite3.ll");
+
+//     var parser = Parser.init(buffer, allocator);
+//     defer parser.deinit(allocator);
+
+//     while (try parser.next()) |_| {
+//         // something
+//     }
+
+//     const iter = parser.module_objects.valueIterator();
+//     for (const )
+// }

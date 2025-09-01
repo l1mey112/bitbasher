@@ -82,7 +82,7 @@ pub fn StaticInternUnmanagedExtra(
         pub fn get(self: *const This, inte: InternIdx) []const u8 {
             var idx = @intFromEnum(inte);
             if (idx < pieces.len) {
-                return pieces[idx].@"0";
+                return std.enums.tagName(InternIdx, inte) orelse unreachable;
             }
             idx -= pieces.len;
             return self.map.entries.get(idx).key;
