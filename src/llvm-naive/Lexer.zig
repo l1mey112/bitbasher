@@ -1039,7 +1039,14 @@ test "nul" {
     try testPieces(buffer, &pieces);
 }
 
+const ignore_test = @import("./lib/ignore_test.zig");
+
 test "amalgamation" {
+    // we will already run this anyway
+    if (ignore_test.hasTestFunction("Parser.test.amalgamation")) {
+        return;
+    }
+
     const allocator = std.testing.allocator;
     const expect = std.testing.expect;
 

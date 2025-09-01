@@ -77,7 +77,7 @@ const ParserError = error{
     NoHashDebugRecords,
     
     ExpectedToken,
-    UnExpectedToken,
+    UnexpectedToken,
 };
 
 fn nextTokInner(self: *Parser, emit_newline: bool) !void {
@@ -171,7 +171,7 @@ pub fn next(self: *Parser) !?void {
             .declare => try self.parseDeclare(),
             .define => try self.parseDefine(),
 
-            else => return ParserError.UnExpectedToken,
+            else => return ParserError.UnexpectedToken,
         }
     }
 }
@@ -1148,13 +1148,8 @@ test "square" {
 
     {
         errdefer {
-            std.debug.print("{s}\n", .{buffer});
             std.debug.print("curr {}\n", .{parser.tok});
             std.debug.print("peek {}\n", .{parser.peek});
-
-            // seen up to
-
-            std.debug.print("{s}\n", .{buffer[parser.tok.loc.start..]});
         }
         while (try parser.next()) |_| {
             // something
@@ -1189,18 +1184,21 @@ test "square" {
     try testPieces(&pieces, alloc_writer.written());
 }
 
-// test "amalgamation" {
-//     const allocator = std.testing.allocator;
+test "amalgamation" {
+    const allocator = std.testing.allocator;
 
-//     const buffer = @embedFile("./test/sqlite3.ll");
+    const buffer = @embedFile("./test/sqlite3.ll");
 
-//     var parser = Parser.init(buffer, allocator);
-//     defer parser.deinit(allocator);
+    var parser = Parser.init(buffer, allocator);
+    defer parser.deinit();
 
-//     while (try parser.next()) |_| {
-//         // something
-//     }
-
-//     const iter = parser.module_objects.valueIterator();
-//     for (const )
-// }
+    {
+        errdefer {
+            std.debug.print("curr {}\n", .{parser.tok});
+            std.debug.print("peek {}\n", .{parser.peek});
+        }
+        while (try parser.next()) |_| {
+            // something
+        }
+    }
+}
