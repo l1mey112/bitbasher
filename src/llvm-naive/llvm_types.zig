@@ -189,7 +189,7 @@ const TypeExtraContext = struct {
     pub fn hash(self: @This(), key: TypeExtra) u32 {  
         _ = self;  
         var hasher = std.hash.Wyhash.init(0);  
-        std.hash.autoHashStrat(&hasher, key, .Deep);  
+        std.hash.autoHashStrat(&hasher, key, .DeepRecursive);
         return @truncate(hasher.final());  
     }  
       

@@ -9,7 +9,6 @@ const TypeId = llvm_types.TypeId;
 const TypeAttribute = llvm_types.TypeAttribute;
 const Token = Lexer.Token;
 const Allocator = std.mem.Allocator;
-const ArrayList = std.ArrayList;
 
 const Function = llvm_module.Function;
 const Global = llvm_module.Global;
@@ -34,6 +33,9 @@ module_objects: std.StringHashMapUnmanaged(*ModuleObject),
 has_init: bool,
 lf_aware: bool,
 
+// %const.0 for unwrapping constant expressions
+reserved_counter: u32,
+
 pub fn init(buffer: [:0]const u8, allocator: Allocator) Parser {
     return .{
         .lexer = Lexer.init(buffer),
@@ -47,6 +49,8 @@ pub fn init(buffer: [:0]const u8, allocator: Allocator) Parser {
         
         .has_init = false,
         .lf_aware = false,
+
+        .reserved_counter = 0,
     };
 }
 
@@ -122,7 +126,6 @@ fn ignoreUntilSkip(self: *Parser, kind: Token.Kind) !void {
 /// Ignores tokens right until and skips `kind`, with respect to nesting.
 /// Will consider the first token `self.tok.kind` and increment the internal nest counter if it is `lkind`.
 fn ignoreUntilSkipNested(self: *Parser, nest_st: u32, lkind: Token.Kind, rkind: Token.Kind) !void {
-    try self.nextTok();
     var nest: isize = -1;
     while (true) {
         if (self.tok.kind == lkind) {
@@ -156,29 +159,28 @@ pub fn next(self: *Parser) !?void {
         self.has_init = true;
     }
     
-    while (true) {
-        if (self.tok.kind == .eof) {
-            return null;
-        }
-
-        switch (self.tok.kind) {
-            // will not support or attempt to skip ThinLTO summary entries
-            .summary_id => return ParserError.NoSummaryEntry,
-
-            // ignore: target ... = 'string'
-            .target => try self.ignoreUntilSkip(.string_constant),
-            // ignore: source_filename ... = 'string'
-            .source_filename => try self.ignoreUntilSkip(.string_constant),
-
-            .declare => try self.parseDeclare(),
-            .define => try self.parseDefine(),
-
-            .local_var, .local_var_id => try self.parseTypeDecl(),
-            .global_var, .global_id => try self.parseGlobalDecl(),
-
-            else => return ParserError.UnexpectedToken,
-        }
+    if (self.tok.kind == .eof) {
+        return null;
     }
+
+    switch (self.tok.kind) {
+        // will not support or attempt to skip ThinLTO summary entries
+        .summary_id => return ParserError.NoSummaryEntry,
+
+        // ignore: target ... = 'string'
+        .target => try self.ignoreUntilSkip(.string_constant),
+        // ignore: source_filename ... = 'string'
+        .source_filename => try self.ignoreUntilSkip(.string_constant),
+
+        .declare => try self.parseDeclare(),
+        .define => try self.parseDefine(),
+
+        .local_var, .local_var_id => try self.parseTypeDecl(),
+        .global_var, .global_id => try self.parseGlobalDecl(),
+
+        else => return ParserError.UnexpectedToken,
+    }
+    // after parsing one thing, just exit
 }
 
 fn parseDeclare(self: *Parser) !void {
@@ -201,6 +203,9 @@ fn parseDeclare(self: *Parser) !void {
 
 fn parseDefine(self: *Parser) !void {
     try self.nextTok();
+
+    // start again at `%const.0`
+    self.reserved_counter = 0;
 
     var f = try self.parseFunctionHeader();
     errdefer f.deinit(self.allocator);
@@ -299,8 +304,8 @@ fn parseGlobal(self: *Parser) !Global {
 
     var has_initialiser = true;
 
-    // skip all the optional things
-    while (self.tok.kind.forgettable()) {
+    // skip all the optional things, dso_local etc
+    while (self.tok.kind.forgettable() or self.tok.kind.isAttributesAndBeyond()) {
         // "If the linkage is specified and is external, then no initializer is present."
         // "isValidDeclarationLinkage"
         if (self.tok.kind == .extern_weak or self.tok.kind == .external) {
@@ -615,6 +620,7 @@ fn parseOptionalAttrs(self: *Parser) ![]const TypeAttribute {
 }
 
 /// Parse the function type, given the return type is already parsed.
+/// Does not take ownership of `ret_attr`, clones it.
 fn parseFunctionType(self: *Parser, ret_type: TypeId, ret_attr: []const TypeAttribute) !struct { TypeId, [][]const u8 } {
     // Types '(' ArgTypeListI ')' OptFuncAttrs
     //       ^^^
@@ -625,10 +631,10 @@ fn parseFunctionType(self: *Parser, ret_type: TypeId, ret_attr: []const TypeAttr
     // separately, the argument names will be returned
 
     // (type, attribute) pair
-    var args: ArrayList(TypeId) = try .initCapacity(self.allocator, 4);
+    var args: std.ArrayList(TypeId) = try .initCapacity(self.allocator, 4);
     defer args.deinit(self.allocator);
 
-    var arg_attrs: ArrayList([]const TypeAttribute) = try .initCapacity(self.allocator, 4);
+    var arg_attrs: std.ArrayList([]const TypeAttribute) = try .initCapacity(self.allocator, 4);
     defer {
         for (arg_attrs.items) |xs| {
             self.allocator.free(xs);
@@ -636,7 +642,7 @@ fn parseFunctionType(self: *Parser, ret_type: TypeId, ret_attr: []const TypeAttr
         arg_attrs.deinit(self.allocator);
     }
 
-    var arg_names: ArrayList([]const u8) = .empty;
+    var arg_names: std.ArrayList([]const u8) = .empty;
     defer arg_names.deinit(self.allocator);
     errdefer {
         for (arg_names.items) |xs| {
@@ -723,7 +729,7 @@ fn parseStructType(self: *Parser) !TypeId {
 
     assert(self.tok.kind == .lbrace);
     
-    var xs: ArrayList(TypeId) = try .initCapacity(self.allocator, 4);
+    var xs: std.ArrayList(TypeId) = try .initCapacity(self.allocator, 4);
     defer xs.deinit(self.allocator);
 
     try self.nextTok();
@@ -852,8 +858,6 @@ fn parseArrayVectorType(self: *Parser) !TypeId {
 //        ^^^^^^^ turn this into a proper pseudo argument
 
 const PseudoParserContext = struct {
-    // %const.0 for unwrapping constant expressions
-    reserved_counter: u32,
     insts: std.ArrayList(Inst),
 };
 
@@ -887,39 +891,43 @@ fn parseAllListsLiteral(self: *Parser, ctx: ?*PseudoParserContext) !PseudoArgume
     }
 
     try self.nextTok();
-    while (true) {
-        const type_id = try self.parseType();
+    if (self.tok.kind != gate) {
+        while (true) {
+            const type_id = try self.parseType();
 
-        // eat the attributes we don't care about
-        // (ptr noundef %169)
-        // (ptr align 8 @alloc_669)
-        if (self.tok.kind.isAttributesAndBeyond()) {
-            const attrs = try self.parseOptionalAttrs();
-            self.allocator.free(attrs); // we don't need these
-        }
-        
-        {
-            const arg = try self.parsePseudoArgument(true, ctx);
+            // eat the attributes we don't care about
+            // (ptr noundef %169)
+            // (ptr align 8 @alloc_669)
+            if (self.tok.kind.isAttributesAndBeyond()) {
+                const attrs = try self.parseOptionalAttrs();
+                self.allocator.free(attrs); // we don't need these
+            }
+            
+            {
+                const arg = try self.parsePseudoArgument(true, ctx);
 
-            // we have something invalid, quick! skip to the end
-            if (arg == .invalid) {
-                for (args.items) |pair| {
-                    pair.arg.deinit(self.allocator);
+                // we have something invalid, quick! skip to the end
+                if (arg == .invalid) {
+                    for (args.items) |pair| {
+                        pair.arg.deinit(self.allocator);
+                    }
+                    try self.ignoreUntilSkipNested(1, begin, gate);
+                    return .invalid;
+                } else {
+                    // errdefer shouldn't apply after the append
+                    errdefer arg.deinit(self.allocator);
+                    try args.append(self.allocator, .{ .type_id = type_id, .arg = arg });
                 }
-                try self.ignoreUntilSkipNested(1, begin, gate);
-                return .invalid;
+            }
+            if (self.tok.kind == gate) {
+                try self.nextTok();
+                break;
             } else {
-                // errdefer shouldn't apply after the append
-                errdefer arg.deinit(self.allocator);
-                try args.append(self.allocator, .{ .type_id = type_id, .arg = arg });
+                try self.expect(.comma);
             }
         }
-        if (self.tok.kind == gate) {
-            try self.nextTok();
-            break;
-        } else {
-            try self.expect(.comma);
-        }
+    } else {
+        try self.nextTok();
     }
 
     const args_owned = try args.toOwnedSlice(self.allocator);
@@ -939,7 +947,7 @@ fn parseAllListsLiteral(self: *Parser, ctx: ?*PseudoParserContext) !PseudoArgume
     }
 }
 
-fn parseListLiteral(self: *Parser, ctx: *PseudoParserContext) !PseudoArgument {
+fn parseListLiteral(self: *Parser, ctx: *PseudoParserContext, not_type: bool) !PseudoArgument {
     assert(self.tok.kind == .lsquare);
 
     var args: std.ArrayList(PseudoArgument) = try .initCapacity(self.allocator, 2);
@@ -950,8 +958,13 @@ fn parseListLiteral(self: *Parser, ctx: *PseudoParserContext) !PseudoArgument {
         }
     }
 
+    try self.nextTok();
     while (self.tok.kind != .rsquare) {
         var next_type = true;
+
+        if (not_type) {
+            next_type = false;
+        }
 
         while (self.tok.kind != .comma and self.tok.kind != .rsquare) {
             const is_type = pseudoIsTypeBegin(self.tok.kind);
@@ -980,17 +993,23 @@ const ParsePseudoArgumentAnchorErrorSet = ParserError
 /// When `ctx == null`, this function parses array literals properly as it is assumed to not parse instructions.
 fn parsePseudoArgument(self: *Parser, not_type: bool, ctx: ?*PseudoParserContext) ParsePseudoArgumentAnchorErrorSet!PseudoArgument {
     if (self.tok.kind.isConstantInstruction()) {
+        // need to skip over entire call instruction
         if (ctx == null) {
+            try self.ignoreUntilSkipNested(0, .lparen, .rparen);
+            // ( .... ) 
+            //         ^>
             return .invalid;
         }
-        const idx = ctx.?.reserved_counter;
-        ctx.?.reserved_counter += 1;
+
+        const idx = self.reserved_counter;
+        self.reserved_counter += 1;
 
         const inner_lhs = try std.fmt.allocPrint(self.allocator, "const.{}", .{idx});
-        errdefer self.allocator.free(inner_lhs);
-        
+        // parseInstruction takes ownership of `inner_lhs`
         try self.parseInstruction(inner_lhs, ctx.?);
-        return .{ .local_var = inner_lhs };
+
+        const inner_lhs_dup = try self.allocator.dupe(u8, inner_lhs);
+        return .{ .local_var = inner_lhs_dup };
     }
 
     if (self.tok.kind == .lparen) {
@@ -1008,11 +1027,20 @@ fn parsePseudoArgument(self: *Parser, not_type: bool, ctx: ?*PseudoParserContext
         return .{ .string_array_literal = str_lit };
     }
 
+    // <{ [...
+    // ^^ beginning of a packed struct, we don't support packed structs
+    if (self.tok.kind == .less and self.peek.kind == .lbrace) {
+        try self.ignoreUntilSkipNested(0, .less, .greater);
+        // ( .... ) 
+        //         ^>
+        return .invalid;
+    }
+
     // structs or vector literals, but only after a type has been parsed
     if (not_type and (self.tok.kind == .lbrace or self.tok.kind == .less or self.tok.kind == .lsquare)) {
         // are we in instruction parsing mode?
         if (ctx != null and self.tok.kind == .lsquare) {
-            return try self.parseListLiteral(ctx.?);
+            return try self.parseListLiteral(ctx.?, not_type);
         } else {
             return try self.parseAllListsLiteral(ctx);
         }
@@ -1059,6 +1087,8 @@ fn parsePseudoArgument(self: *Parser, not_type: bool, ctx: ?*PseudoParserContext
         .poison => .poison,
         .zeroinitializer => .zeroinitializer,
         .@"null" => .@"null",
+        .@"false" => .@"false",
+        .@"true" => .@"true",
         .integer_literal => blk: {
             const dup = try self.tok.loc.sliceAlloc(self.allocator, self.lexer.b);
             break :blk .{ .integer_literal = dup };
@@ -1082,6 +1112,7 @@ fn parsePseudoArgument(self: *Parser, not_type: bool, ctx: ?*PseudoParserContext
     return final_pseudo;
 }
 
+/// Takes ownership of `lhs`, if present.
 fn parseInstruction(self: *Parser, lhs: ?[]const u8, ctx: *PseudoParserContext) !void {
     const inst_kind = self.tok.kind;
     try self.nextTok();
@@ -1091,6 +1122,11 @@ fn parseInstruction(self: *Parser, lhs: ?[]const u8, ctx: *PseudoParserContext) 
     errdefer {
         for (pseudos.items) |arg| {
             arg.deinit(self.allocator);
+        }
+    }
+    errdefer {
+        if (lhs) |v| {
+            self.allocator.free(v);
         }
     }
 
@@ -1116,7 +1152,7 @@ fn parseInstruction(self: *Parser, lhs: ?[]const u8, ctx: *PseudoParserContext) 
     }
 
     var first_type = true;
-    
+
     while (true) {
         if (is_inner and self.tok.kind == .rparen) {
             try self.nextTok();
@@ -1143,12 +1179,15 @@ fn parseInstruction(self: *Parser, lhs: ?[]const u8, ctx: *PseudoParserContext) 
         }
     }
 
-    const inst: Inst = .{
+    var inst: Inst = .{
         .lhs = lhs,
         .kind = inst_kind,
         .args = try pseudos.toOwnedSlice(self.allocator),
     };
-    errdefer inst.deinit(self.allocator);
+    errdefer {
+        inst.lhs = null; // `lhs` is already opted to be freed at the top
+        inst.deinit(self.allocator);
+    }
     try ctx.insts.append(self.allocator, inst);
 }
 
@@ -1169,7 +1208,6 @@ fn parseBasicBlock(self: *Parser, f: *Function, first: bool) !void {
 
     var ctx: PseudoParserContext = .{
         .insts = try .initCapacity(self.allocator, 4),
-        .reserved_counter = 0,
     };
     errdefer ctx.insts.deinit(self.allocator);
     errdefer {
@@ -1204,6 +1242,7 @@ fn parseBasicBlock(self: *Parser, f: *Function, first: bool) !void {
             try self.expect(.equal);
             break :blk dup;
         } else null;
+        
         // we want `.newline` tokens from now on, hence the usage of `*Lf` functions.
         // LLVM has many instructions, i value my time, so im just going to use a
         // newline aware lazy way of parsing.
@@ -1414,21 +1453,38 @@ test "decls" {
     , "{f}", .{azTempDirs.global.Fmt(&parser)});
 }
 
-// test "amalgamation" {
-//     const allocator = std.testing.allocator;
+test "amalgamation" {
+    const allocator = std.testing.allocator;
 
-//     const buffer = @embedFile("./test/sqlite3.ll");
+    const buffer = @embedFile("./test/sqlite3.ll");
 
-//     var parser = Parser.init(buffer, allocator);
-//     defer parser.deinit();
+    var parser = Parser.init(buffer, allocator);
+    defer parser.deinit();
 
-//     {
-//         errdefer {
-//             std.debug.print("curr {}\n", .{parser.tok});
-//             std.debug.print("peek {}\n", .{parser.peek});
-//         }
-//         while (try parser.next()) |_| {
-//             // something
-//         }
-//     }
-// }
+    {
+        errdefer {
+            std.debug.print("curr {}\n", .{parser.tok});
+            std.debug.print("peek {}\n", .{parser.peek});
+
+            std.debug.print("{s}\n", .{buffer[parser.tok.loc.start..parser.tok.loc.start + 40]});
+        }
+
+        while (try parser.next()) |_| {
+            // something
+        }
+    }
+
+    // var buf: [1024]u8 = undefined;
+    // const stderr = std.debug.lockStderrWriter(&buf);
+    // defer std.debug.unlockStderrWriter();
+
+    // var iter = parser.module_objects.valueIterator();
+    // while (iter.next()) |obj| {
+    //     switch (obj.*.*) {
+    //         .function => |*v| {
+    //             try v.formatWriter(stderr, &parser);
+    //         },
+    //         else => {},
+    //     }
+    // }
+}

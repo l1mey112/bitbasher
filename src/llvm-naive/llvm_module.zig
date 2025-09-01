@@ -126,6 +126,8 @@ pub const PseudoArgument = union(enum) {
     undef,
     poison,
     zeroinitializer,
+    @"false",
+    @"true",
 
     // parsing a constant instruction in a global decl isn't supported for example
     invalid,
@@ -135,14 +137,19 @@ pub const PseudoArgument = union(enum) {
     pub fn deinit(self: PseudoArgument, allocator: Allocator) void {
         switch (self) {
             .local_var, .global_var, .label, .integer_literal, .float_literal, .hex_float_literal, .string_array_literal => |v| allocator.free(v),
-            .list => |v| allocator.free(v),
+            .list => |v| {
+                for (v) |arg| {
+                    arg.deinit(allocator);
+                }
+                allocator.free(v);
+            },
             .struct_literal, .vector_literal, .array_literal, .call_list => |v| {
                 for (v) |pair| {
                     pair.arg.deinit(allocator);
                 }
                 allocator.free(v);
             },
-            .type_id, .token, .@"null", .undef, .poison, .zeroinitializer, .invalid => {}
+            .type_id, .token, .@"null", .undef, .poison, .zeroinitializer, .invalid, .@"false", .@"true" => {}
         }
     }
 
@@ -175,14 +182,14 @@ pub const PseudoArgument = union(enum) {
                 try writer.print("c\"{s}\"", .{v});
             },
             .list => |v| {
-                try writer.print("[", .{});
+                try writer.print("[ ", .{});
                 for (v, 0..) |arg, i| {
                     try arg.formatInner(writer, parser);
                     if (i + 1 < v.len) {
                         try writer.print(", ", .{});
                     }
                 }
-                try writer.print("]", .{});
+                try writer.print(" ]", .{});
             },
             .struct_literal => |v| {
                 try formatPseudoPair('{', '}', v, writer, parser);
@@ -201,6 +208,8 @@ pub const PseudoArgument = union(enum) {
             .label => |v| try writer.print("label %{s}", .{v}),
             .type_id => |v| try writer.print("[type {f}]", .{v.Fmt(parser)}),
             .@"null" => try writer.print("null", .{}),
+            .@"false" => try writer.print("false", .{}),
+            .@"true" => try writer.print("true", .{}),
             .undef => try writer.print("undef", .{}),
             .poison => try writer.print("poison", .{}),
             .zeroinitializer => try writer.print("zeroinitializer", .{}),

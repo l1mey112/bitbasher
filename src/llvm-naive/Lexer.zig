@@ -188,8 +188,6 @@ pub const Token = struct {
         riscv_vls_cc,
         cc,
 
-        zeroinitializer,
-        
         // Random other attributes
         unnamed_addr,
         local_unnamed_addr,
@@ -212,6 +210,9 @@ pub const Token = struct {
 
         undef,
         poison,
+        zeroinitializer,
+        @"false",
+        @"true",
 
         // Parameter Attributes
         // https://llvm.org/docs/LangRef.html#parameter-attributes
