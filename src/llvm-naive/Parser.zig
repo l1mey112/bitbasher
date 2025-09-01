@@ -12,6 +12,7 @@ const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 
 const Function = llvm_module.Function;
+const Global = llvm_module.Global;
 const PseudoArgument = llvm_module.PseudoArgument;
 const Inst = llvm_module.Inst;
 const BasicBlock = llvm_module.BasicBlock;
@@ -75,6 +76,7 @@ const ParserError = error{
     NoPersonality,
     NoGC,
     NoHashDebugRecords,
+    NoAliasOrIFunc,
     
     ExpectedToken,
     UnexpectedToken,
@@ -171,6 +173,9 @@ pub fn next(self: *Parser) !?void {
             .declare => try self.parseDeclare(),
             .define => try self.parseDefine(),
 
+            .local_var, .local_var_id => try self.parseTypeDecl(),
+            .global_var, .global_id => try self.parseGlobalDecl(),
+
             else => return ParserError.UnexpectedToken,
         }
     }
@@ -207,7 +212,6 @@ fn parseDefine(self: *Parser) !void {
     //   ::= '{' BasicBlock+ UseListOrderDirective* '}'
     //       ^^^
     try self.expect(.lbrace);
-
     self.lf_aware = true;
 
     var first = true;
@@ -232,6 +236,143 @@ fn parseDefine(self: *Parser) !void {
         new_f.bbs = f.bbs.move();
         f.deinit(self.allocator);
     }
+}
+
+fn parseTypeDecl(self: *Parser) !void {
+    // toplevelentity
+    //   ::= LocalVar '=' 'type' type
+    //   ::= LocalVarID '=' 'type' type
+    assert(self.tok.kind == .local_var or self.tok.kind == .local_var_id);
+
+    const name = self.tok.loc.slice(self.lexer.b);
+    try self.nextTok();
+
+    try self.expect(.equal);
+    try self.expect(.@"type");
+
+    const type_id = try self.parseType();
+    const decl_type_id = try self.type_table.intern(self.allocator, .{ .named = .{ .name = name } });
+
+    self.type_table.defineNamed(decl_type_id, type_id);
+}
+
+fn parseGlobalDecl(self: *Parser) !void {
+    var g = try self.parseGlobal();
+    errdefer g.deinit(self.allocator);
+    
+    const gop = try self.module_objects.getOrPut(self.allocator, g.name);
+    if (!gop.found_existing) {
+        const obj = try self.allocator.create(ModuleObject);
+        errdefer self.allocator.free(obj);
+
+        obj.* = .{ .global = g };
+        gop.value_ptr.* = obj;
+    } else {
+        var new_g = &gop.value_ptr.*.global;
+        assert(new_g.value == null);
+
+        new_g.value = g.value; // move
+        g.value = .poison;
+        g.deinit(self.allocator);
+    }
+}
+
+fn parseGlobal(self: *Parser) !Global {
+    // "parseUnnamedGlobal:"
+    //   GlobalID '=' OptionalVisibility (ALIAS | IFUNC) ...
+    //   GlobalID '=' OptionalLinkage OptionalPreemptionSpecifier
+    //   OptionalVisibility
+    //                OptionalDLLStorageClass
+    //                                                     ...   -> global variable
+    // "parseNamedGlobal:"
+    //   GlobalVar '=' OptionalVisibility (ALIAS | IFUNC) ...
+    //   GlobalVar '=' OptionalLinkage OptionalPreemptionSpecifier
+    //                 OptionalVisibility OptionalDLLStorageClass
+    //                                                     ...   -> global variable
+    assert(self.tok.kind == .global_var or self.tok.kind == .global_id);
+
+    const name = try self.tok.loc.sliceAlloc(self.allocator, self.lexer.b);
+    errdefer self.allocator.free(name);
+    try self.nextTok();
+
+    try self.expect(.equal);
+
+    var has_initialiser = true;
+
+    // skip all the optional things
+    while (self.tok.kind.forgettable()) {
+        // "If the linkage is specified and is external, then no initializer is present."
+        // "isValidDeclarationLinkage"
+        if (self.tok.kind == .extern_weak or self.tok.kind == .external) {
+            has_initialiser = false;
+        }
+        // "parseOptionalThreadLocal"
+        //   := /*empty*/
+        //   := 'thread_local'
+        //   := 'thread_local' '(' tlsmodel ')'
+        if (self.tok.kind == .thread_local and self.peek.kind == .lparen) {
+            try self.ignoreUntilSkip(.rparen);
+            continue;
+        }
+        try self.nextTok();
+    }
+
+    switch (self.tok.kind) {
+        .alias, .ifunc => return ParserError.NoAliasOrIFunc,
+        else => {},
+    }
+
+    // := 'addrspace' '(' uint32 ')'
+    if (self.peek.kind == .@"addrspace") {
+        try self.ignoreUntilSkip(.rparen); // after ')'
+    }
+    while (self.tok.kind.forgettable()) {
+        // externally_initialized
+        try self.nextTok();
+    }
+
+    // "parseGlobalType"
+    //   ::= 'constant'
+    //   ::= 'global'
+    var is_constant = false;
+    switch (self.tok.kind) {
+        .global => is_constant = true,
+        .constant => {},
+        else => return ParserError.ExpectedToken,
+    }
+    try self.nextTok();
+
+    var alignment: ?u64 = null;
+    var value: ?PseudoArgument = null;
+    errdefer {
+        if (value) |v| {
+            v.deinit(self.allocator);
+        }
+    }
+
+    const type_id = try self.parseType();
+    if (has_initialiser) {
+        value = try self.parsePseudoArgument(true, null);
+
+        while (self.tok.kind == .comma) {
+            try self.nextTok();
+            if (self.tok.kind == .@"align") {
+                try self.nextTok();
+                const curr = self.tok;
+                try self.expect(.integer_literal);
+                alignment = try curr.loc.unsigned(self.lexer.b);
+            }
+        }
+        // we should be at a newline here
+    }
+
+    return .{
+        .name = name,
+        .type_id = type_id,
+        .value = value,
+        .is_constant = is_constant,
+        .alignment = alignment,
+    };
 }
 
 fn skipMetadata(self: *Parser) !void {
@@ -726,22 +867,24 @@ fn pseudoIsTypeBegin(kind: Token.Kind) bool {
     };
 }
 
-fn parseVectorStructCallListLiteral(self: *Parser, ctx: *PseudoParserContext) !PseudoArgument {
-    const gate: Token.Kind = switch (self.tok.kind) {
+/// This will parse arrays into literal LLVM arrays, not fake lists.
+fn parseAllListsLiteral(self: *Parser, ctx: ?*PseudoParserContext) !PseudoArgument {
+    const begin = self.tok.kind;
+    const gate: Token.Kind = switch (begin) {
         .lbrace => .rbrace,
         .less => .greater,
         .lparen => .rparen,
+        .lsquare => .rsquare,
         else => unreachable,
     };
 
     var args: std.ArrayList(PseudoArgument.PseudoPair) = try .initCapacity(self.allocator, 2);
     defer args.deinit(self.allocator);
     errdefer {
-        for (args.items) |arg| {
-            arg.arg.deinit(self.allocator);
+        for (args.items) |pair| {
+            pair.arg.deinit(self.allocator);
         }
     }
-
 
     try self.nextTok();
     while (true) {
@@ -757,9 +900,19 @@ fn parseVectorStructCallListLiteral(self: *Parser, ctx: *PseudoParserContext) !P
         
         {
             const arg = try self.parsePseudoArgument(true, ctx);
-            // errdefer shouldn't apply after the append
-            errdefer arg.deinit(self.allocator);
-            try args.append(self.allocator, .{ .type_id = type_id, .arg = arg });
+
+            // we have something invalid, quick! skip to the end
+            if (arg == .invalid) {
+                for (args.items) |pair| {
+                    pair.arg.deinit(self.allocator);
+                }
+                try self.ignoreUntilSkipNested(1, begin, gate);
+                return .invalid;
+            } else {
+                // errdefer shouldn't apply after the append
+                errdefer arg.deinit(self.allocator);
+                try args.append(self.allocator, .{ .type_id = type_id, .arg = arg });
+            }
         }
         if (self.tok.kind == gate) {
             try self.nextTok();
@@ -774,9 +927,12 @@ fn parseVectorStructCallListLiteral(self: *Parser, ctx: *PseudoParserContext) !P
     if (gate == .rbrace) {
         // struct    
         return .{ .struct_literal = args_owned };
-    } else if (gate == .less) {
+    } else if (gate == .greater) {
         // vector
         return .{ .vector_literal = args_owned };
+    } else if (gate == .rsquare) {
+        // array
+        return .{ .array_literal = args_owned };
     } else {
         // call list
         return .{ .call_list = args_owned };
@@ -821,28 +977,44 @@ const ParsePseudoArgumentAnchorErrorSet = ParserError
     || error{Overflow, InvalidCharacter}
     || error{OutOfMemory};
 
-fn parsePseudoArgument(self: *Parser, not_type: bool, ctx: *PseudoParserContext) ParsePseudoArgumentAnchorErrorSet!PseudoArgument {
+/// When `ctx == null`, this function parses array literals properly as it is assumed to not parse instructions.
+fn parsePseudoArgument(self: *Parser, not_type: bool, ctx: ?*PseudoParserContext) ParsePseudoArgumentAnchorErrorSet!PseudoArgument {
     if (self.tok.kind.isConstantInstruction()) {
-        const idx = ctx.reserved_counter;
-        ctx.reserved_counter += 1;
+        if (ctx == null) {
+            return .invalid;
+        }
+        const idx = ctx.?.reserved_counter;
+        ctx.?.reserved_counter += 1;
 
         const inner_lhs = try std.fmt.allocPrint(self.allocator, "const.{}", .{idx});
         errdefer self.allocator.free(inner_lhs);
         
-        try self.parseInstruction(inner_lhs, ctx);
+        try self.parseInstruction(inner_lhs, ctx.?);
         return .{ .local_var = inner_lhs };
     }
 
     if (self.tok.kind == .lparen) {
-        return try self.parseVectorStructCallListLiteral(ctx);
+        return try self.parseAllListsLiteral(ctx.?);
+    }
+
+    // "As a special case, character array constants may also be represented as a double-quoted
+    // string using the c prefix. For example: c"Hello World\0A\00"."
+    if (self.tok.kind == .c) {
+        try self.nextTok();
+        const str_lit = try self.tok.loc.sliceAlloc(self.allocator, self.lexer.b);
+        errdefer self.allocator.free(str_lit);
+
+        try self.expect(.string_constant);
+        return .{ .string_array_literal = str_lit };
     }
 
     // structs or vector literals, but only after a type has been parsed
     if (not_type and (self.tok.kind == .lbrace or self.tok.kind == .less or self.tok.kind == .lsquare)) {
-        if (self.tok.kind == .lsquare) {
-            return try self.parseListLiteral(ctx);
+        // are we in instruction parsing mode?
+        if (ctx != null and self.tok.kind == .lsquare) {
+            return try self.parseListLiteral(ctx.?);
         } else {
-            return try self.parseVectorStructCallListLiteral(ctx);
+            return try self.parseAllListsLiteral(ctx);
         }
     } else if (pseudoIsTypeBegin(self.tok.kind)) {
         const type_id = try self.parseType();
@@ -886,6 +1058,7 @@ fn parsePseudoArgument(self: *Parser, not_type: bool, ctx: *PseudoParserContext)
         .undef => .undef,
         .poison => .poison,
         .zeroinitializer => .zeroinitializer,
+        .@"null" => .@"null",
         .integer_literal => blk: {
             const dup = try self.tok.loc.sliceAlloc(self.allocator, self.lexer.b);
             break :blk .{ .integer_literal = dup };
@@ -912,12 +1085,6 @@ fn parsePseudoArgument(self: *Parser, not_type: bool, ctx: *PseudoParserContext)
 fn parseInstruction(self: *Parser, lhs: ?[]const u8, ctx: *PseudoParserContext) !void {
     const inst_kind = self.tok.kind;
     try self.nextTok();
-
-    // var inst: Inst = .{
-    //     .lhs = lhs,
-    //     .kind = inst_kind,
-    //     .args = 
-    // };
 
     var pseudos: std.ArrayList(PseudoArgument) = try .initCapacity(self.allocator, 3);
     defer pseudos.deinit(self.allocator);
@@ -1184,10 +1351,27 @@ test "square" {
     try testPieces(&pieces, alloc_writer.written());
 }
 
-test "amalgamation" {
+test "decls" {
     const allocator = std.testing.allocator;
+    const expectFmt = std.testing.expectFmt;
 
-    const buffer = @embedFile("./test/sqlite3.ll");
+
+    const buffer =
+        \\%struct.sqlite3StatType = type { [10 x i64], [10 x i64] }
+        \\%struct.et_info = type { i8, i8, i8, i8, i8, i8 }
+        \\%struct.sqlite3PrngType = type { [16 x i32], [64 x i8], i8 }
+        \\%struct.VdbeOpList = type { i8, i8, i8, i8 }
+        \\%struct.compareInfo = type { i8, i8, i8, i8 }
+        \\%struct.FuncDefHash = type { [23 x ptr] }
+        \\%struct.sqlite3_mem_methods = type { ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr }
+        \\%struct.sqlite3_mutex_methods = type { ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr }
+        \\%struct.sqlite3_mutex = type { %union.pthread_mutex_t }
+        \\
+        \\@.str.1246 = private unnamed_addr constant [17 x i8] c"json_group_array\00", align 1
+        \\@azTempDirs = internal global [6 x ptr] [ptr null, ptr null, ptr @.str.89, ptr @.str.90, ptr @.str.91, ptr @.str.9], align 16
+        \\
+        \\@sqlite3RegisterJsonFunctions.aJsonFunc = internal global [34 x { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 }] [{ i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 1, [2 x i8] zeroinitializer, i32 25200641, ptr null, ptr null, ptr @jsonRemoveFunc, ptr null, ptr null, ptr null, ptr @.str.1220, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 1, [2 x i8] zeroinitializer, i32 8423425, ptr inttoptr (i64 8 to ptr), ptr null, ptr @jsonRemoveFunc, ptr null, ptr null, ptr null, ptr @.str.1221, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 -1, [2 x i8] zeroinitializer, i32 26216449, ptr null, ptr null, ptr @jsonArrayFunc, ptr null, ptr null, ptr null, ptr @.str.1222, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 -1, [2 x i8] zeroinitializer, i32 26216449, ptr inttoptr (i64 8 to ptr), ptr null, ptr @jsonArrayFunc, ptr null, ptr null, ptr null, ptr @.str.1223, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 1, [2 x i8] zeroinitializer, i32 8423425, ptr null, ptr null, ptr @jsonArrayLengthFunc, ptr null, ptr null, ptr null, ptr @.str.1224, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 2, [2 x i8] zeroinitializer, i32 8423425, ptr null, ptr null, ptr @jsonArrayLengthFunc, ptr null, ptr null, ptr null, ptr @.str.1224, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 1, [2 x i8] zeroinitializer, i32 8423425, ptr null, ptr null, ptr @jsonErrorFunc, ptr null, ptr null, ptr null, ptr @.str.1225, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 -1, [2 x i8] zeroinitializer, i32 25200641, ptr null, ptr null, ptr @jsonExtractFunc, ptr null, ptr null, ptr null, ptr @.str.1226, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 -1, [2 x i8] zeroinitializer, i32 8423425, ptr inttoptr (i64 8 to ptr), ptr null, ptr @jsonExtractFunc, ptr null, ptr null, ptr null, ptr @.str.1227, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 2, [2 x i8] zeroinitializer, i32 25200641, ptr inttoptr (i64 1 to ptr), ptr null, ptr @jsonExtractFunc, ptr null, ptr null, ptr null, ptr @.str.1228, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 2, [2 x i8] zeroinitializer, i32 8423425, ptr inttoptr (i64 2 to ptr), ptr null, ptr @jsonExtractFunc, ptr null, ptr null, ptr null, ptr @.str.1229, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 -1, [2 x i8] zeroinitializer, i32 26249217, ptr null, ptr null, ptr @jsonSetFunc, ptr null, ptr null, ptr null, ptr @.str.1230, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 -1, [2 x i8] zeroinitializer, i32 9472001, ptr inttoptr (i64 8 to ptr), ptr null, ptr @jsonSetFunc, ptr null, ptr null, ptr null, ptr @.str.1231, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 -1, [2 x i8] zeroinitializer, i32 26216449, ptr null, ptr null, ptr @jsonObjectFunc, ptr null, ptr null, ptr null, ptr @.str.1232, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 -1, [2 x i8] zeroinitializer, i32 26216449, ptr inttoptr (i64 8 to ptr), ptr null, ptr @jsonObjectFunc, ptr null, ptr null, ptr null, ptr @.str.1233, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 2, [2 x i8] zeroinitializer, i32 25200641, ptr null, ptr null, ptr @jsonPatchFunc, ptr null, ptr null, ptr null, ptr @.str.1234, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 2, [2 x i8] zeroinitializer, i32 8423425, ptr inttoptr (i64 8 to ptr), ptr null, ptr @jsonPatchFunc, ptr null, ptr null, ptr null, ptr @.str.1235, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 1, [2 x i8] zeroinitializer, i32 8423425, ptr null, ptr null, ptr @jsonPrettyFunc, ptr null, ptr null, ptr null, ptr @.str.1236, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 2, [2 x i8] zeroinitializer, i32 8423425, ptr null, ptr null, ptr @jsonPrettyFunc, ptr null, ptr null, ptr null, ptr @.str.1236, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 1, [2 x i8] zeroinitializer, i32 26216449, ptr null, ptr null, ptr @jsonQuoteFunc, ptr null, ptr null, ptr null, ptr @.str.1237, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 -1, [2 x i8] zeroinitializer, i32 25200641, ptr null, ptr null, ptr @jsonRemoveFunc, ptr null, ptr null, ptr null, ptr @.str.1238, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 -1, [2 x i8] zeroinitializer, i32 8423425, ptr inttoptr (i64 8 to ptr), ptr null, ptr @jsonRemoveFunc, ptr null, ptr null, ptr null, ptr @.str.1239, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 -1, [2 x i8] zeroinitializer, i32 26249217, ptr null, ptr null, ptr @jsonReplaceFunc, ptr null, ptr null, ptr null, ptr @.str.1240, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 -1, [2 x i8] zeroinitializer, i32 9472001, ptr inttoptr (i64 8 to ptr), ptr null, ptr @jsonReplaceFunc, ptr null, ptr null, ptr null, ptr @.str.1241, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 -1, [2 x i8] zeroinitializer, i32 26249217, ptr inttoptr (i64 4 to ptr), ptr null, ptr @jsonSetFunc, ptr null, ptr null, ptr null, ptr @.str.1242, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 -1, [2 x i8] zeroinitializer, i32 9472001, ptr inttoptr (i64 12 to ptr), ptr null, ptr @jsonSetFunc, ptr null, ptr null, ptr null, ptr @.str.1243, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 1, [2 x i8] zeroinitializer, i32 8423425, ptr null, ptr null, ptr @jsonTypeFunc, ptr null, ptr null, ptr null, ptr @.str.1244, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 2, [2 x i8] zeroinitializer, i32 8423425, ptr null, ptr null, ptr @jsonTypeFunc, ptr null, ptr null, ptr null, ptr @.str.1244, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 1, [2 x i8] zeroinitializer, i32 8423425, ptr null, ptr null, ptr @jsonValidFunc, ptr null, ptr null, ptr null, ptr @.str.1245, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 2, [2 x i8] zeroinitializer, i32 8423425, ptr null, ptr null, ptr @jsonValidFunc, ptr null, ptr null, ptr null, ptr @.str.1245, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 1, [2 x i8] zeroinitializer, i32 26216449, ptr null, ptr null, ptr @jsonArrayStep, ptr @jsonArrayFinal, ptr @jsonArrayValue, ptr @jsonGroupInverse, ptr @.str.1246, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 1, [2 x i8] zeroinitializer, i32 26216449, ptr inttoptr (i64 8 to ptr), ptr null, ptr @jsonArrayStep, ptr @jsonArrayFinal, ptr @jsonArrayValue, ptr @jsonGroupInverse, ptr @.str.1247, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 2, [2 x i8] zeroinitializer, i32 26216449, ptr null, ptr null, ptr @jsonObjectStep, ptr @jsonObjectFinal, ptr @jsonObjectValue, ptr @jsonGroupInverse, ptr @.str.1248, %union.anon.10 zeroinitializer }, { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 } { i16 2, [2 x i8] zeroinitializer, i32 26216449, ptr inttoptr (i64 8 to ptr), ptr null, ptr @jsonObjectStep, ptr @jsonObjectFinal, ptr @jsonObjectValue, ptr @jsonGroupInverse, ptr @.str.1249, %union.anon.10 zeroinitializer }], align 16
+    ;
 
     var parser = Parser.init(buffer, allocator);
     defer parser.deinit();
@@ -1201,4 +1385,50 @@ test "amalgamation" {
             // something
         }
     }
+
+    const funcDefHash = parser.type_table.getNamedDirect("struct.FuncDefHash") orelse unreachable;
+    const sqlite3PrngType = parser.type_table.getNamedDirect("struct.sqlite3PrngType") orelse unreachable;
+    const sqlite3Mutex = parser.type_table.getNamedDirect("struct.sqlite3_mutex") orelse unreachable;
+
+    const str1246 = parser.module_objects.get(".str.1246") orelse unreachable;
+    const aJsonFunc = parser.module_objects.get("sqlite3RegisterJsonFunctions.aJsonFunc") orelse unreachable;
+    const azTempDirs = parser.module_objects.get("azTempDirs") orelse unreachable;
+
+    try expectFmt("[23 x ptr]", "{f}", .{parser.type_table.extra(funcDefHash).@"struct".xs[0].Fmt(&parser)});
+    try expectFmt("{ [16 x i32], [64 x i8], i8 }", "{f}", .{sqlite3PrngType.Fmt(&parser)});
+    try expectFmt("{ %union.pthread_mutex_t }", "{f}", .{sqlite3Mutex.Fmt(&parser)});
+
+    try expectFmt(
+        \\@.str.1246 = global [17 x i8] c"json_group_array\00", align 1
+        \\
+    , "{f}", .{str1246.global.Fmt(&parser)});
+
+    try expectFmt(
+        \\@sqlite3RegisterJsonFunctions.aJsonFunc = constant [34 x { i16, [2 x i8], i32, ptr, ptr, ptr, ptr, ptr, ptr, ptr, %union.anon.10 }] <INVALID>, align 16
+        \\
+    , "{f}", .{aJsonFunc.global.Fmt(&parser)});
+
+    try expectFmt(
+        \\@azTempDirs = constant [6 x ptr] [ptr null, ptr null, ptr @.str.89, ptr @.str.90, ptr @.str.91, ptr @.str.9], align 16
+        \\
+    , "{f}", .{azTempDirs.global.Fmt(&parser)});
 }
+
+// test "amalgamation" {
+//     const allocator = std.testing.allocator;
+
+//     const buffer = @embedFile("./test/sqlite3.ll");
+
+//     var parser = Parser.init(buffer, allocator);
+//     defer parser.deinit();
+
+//     {
+//         errdefer {
+//             std.debug.print("curr {}\n", .{parser.tok});
+//             std.debug.print("peek {}\n", .{parser.peek});
+//         }
+//         while (try parser.next()) |_| {
+//             // something
+//         }
+//     }
+// }

@@ -99,7 +99,6 @@ pub const Function = struct {
     }
 };
 
-
 pub const PseudoArgument = union(enum) {
     token: Token.Kind,
     local_var: []const u8,
@@ -110,31 +109,40 @@ pub const PseudoArgument = union(enum) {
     integer_literal: []const u8,
     float_literal: []const u8,
     hex_float_literal: []const u8,
-    list: []const PseudoArgument, // [ ... ]
     struct_literal: []const PseudoPair,
     vector_literal: []const PseudoPair,
+    array_literal: []const PseudoPair,
+
+    list: []const PseudoArgument, // [ ... ]
+
+    // c"Hello World\0A\00"
+    string_array_literal: []const u8,
 
     // call i32 @sqlite3PagerWrite(ptr noundef %169)
     // this is ignoring all the attributes
     call_list: []const PseudoPair,
 
+    @"null",
     undef,
     poison,
     zeroinitializer,
+
+    // parsing a constant instruction in a global decl isn't supported for example
+    invalid,
 
     pub const PseudoPair = struct { type_id: TypeId, arg: PseudoArgument };
 
     pub fn deinit(self: PseudoArgument, allocator: Allocator) void {
         switch (self) {
-            .local_var, .global_var, .label, .integer_literal, .float_literal, .hex_float_literal => |v| allocator.free(v),
+            .local_var, .global_var, .label, .integer_literal, .float_literal, .hex_float_literal, .string_array_literal => |v| allocator.free(v),
             .list => |v| allocator.free(v),
-            .struct_literal, .vector_literal, .call_list => |v| {
+            .struct_literal, .vector_literal, .array_literal, .call_list => |v| {
                 for (v) |pair| {
                     pair.arg.deinit(allocator);
                 }
                 allocator.free(v);
             },
-            .type_id, .token, .undef, .poison, .zeroinitializer => {}
+            .type_id, .token, .@"null", .undef, .poison, .zeroinitializer, .invalid => {}
         }
     }
 
@@ -144,7 +152,7 @@ pub const PseudoArgument = union(enum) {
     }
     fn formatPseudoPair(open: u8, close: u8, v: []const PseudoPair, writer: *Writer, parser: *const Parser) Writer.Error!void {
         try writer.print("{c}", .{open});
-        if (open != '(') try writer.print(" ", .{});
+        if (open != '(' and open != '[') try writer.print(" ", .{});
         for (v, 0..) |pair, i| {
             try writer.print("{f} ", .{pair.type_id.Fmt(parser)});
             try pair.arg.formatInner(writer, parser);
@@ -152,7 +160,7 @@ pub const PseudoArgument = union(enum) {
                 try writer.print(", ", .{});
             }
         }
-        if (open != '(') try writer.print(" ", .{});
+        if (open != '(' and open != '[') try writer.print(" ", .{});
         try writer.print("{c}", .{close});
     }
     fn formatInner(self: PseudoArgument, writer: *Writer, parser: *const Parser) Writer.Error!void {
@@ -162,6 +170,9 @@ pub const PseudoArgument = union(enum) {
             },
             .integer_literal, .float_literal, .hex_float_literal => |v| {
                 try writer.print("{s}", .{v});
+            },
+            .string_array_literal => |v| {
+                try writer.print("c\"{s}\"", .{v});
             },
             .list => |v| {
                 try writer.print("[", .{});
@@ -179,6 +190,9 @@ pub const PseudoArgument = union(enum) {
             .vector_literal => |v| {
                 try formatPseudoPair('<', '>', v, writer, parser);
             },
+            .array_literal => |v| {
+                try formatPseudoPair('[', ']', v, writer, parser);
+            },
             .call_list => |v| {
                 try formatPseudoPair('(', ')', v, writer, parser);
             },
@@ -186,10 +200,28 @@ pub const PseudoArgument = union(enum) {
             .global_var => |v| try writer.print("@{s}", .{v}),
             .label => |v| try writer.print("label %{s}", .{v}),
             .type_id => |v| try writer.print("[type {f}]", .{v.Fmt(parser)}),
+            .@"null" => try writer.print("null", .{}),
             .undef => try writer.print("undef", .{}),
             .poison => try writer.print("poison", .{}),
             .zeroinitializer => try writer.print("zeroinitializer", .{}),
+            .invalid => try writer.print("<INVALID>", .{}),
         }
+    }
+
+    const _Fmt = struct {
+        arg: *const PseudoArgument,
+        parser: *const Parser,
+
+        pub fn format(self: _Fmt, writer: *Writer) Writer.Error!void {
+            try self.arg.formatWriter(writer, self.parser);
+        }
+    };
+
+    pub fn Fmt(arg: *const PseudoArgument, parser: *const Parser) _Fmt {
+        return .{
+            .arg = arg,
+            .parser = parser,
+        };
     }
 };
 
@@ -232,12 +264,67 @@ pub const BasicBlock = struct {
     insts: std.ArrayList(Inst),
 };
 
+pub const Global = struct {
+    name: []const u8,
+
+    type_id: TypeId,
+    value: ?PseudoArgument,
+
+    is_constant: bool,
+    alignment: ?u64,
+
+    pub fn deinit(self: *Global, allocator: Allocator) void {
+        allocator.free(self.name);
+        if (self.value) |*value| {
+            value.deinit(allocator);
+        }
+    }
+
+    pub fn formatWriter(self: Global, writer: *Writer, parser: *const Parser) Writer.Error!void {
+        try writer.print("@{s} = ", .{self.name});
+        if (self.is_constant) {
+            try writer.print("constant ", .{});
+        } else {
+            try writer.print("global ", .{});
+        }
+        try writer.print("{f}", .{self.type_id.Fmt(parser)});
+        if (self.value) |value| {
+            try writer.print(" {f}", .{value.Fmt(parser)});
+        }
+        if (self.alignment) |alignment| {
+            try writer.print(", align {}", .{alignment});
+        }
+        try writer.print("\n", .{});
+        try writer.flush();
+    }
+    
+    const _Fmt = struct {
+        global: *const Global,
+        parser: *const Parser,
+
+        pub fn format(self: _Fmt, writer: *Writer) Writer.Error!void {
+            try self.global.formatWriter(writer, self.parser);
+        }
+    };
+
+    pub fn Fmt(global: *const Global, parser: *const Parser) _Fmt {
+        return .{
+            .global = global,
+            .parser = parser,
+        };
+    }
+};
+
 pub const ModuleObject = union(enum) {
 	function: Function,
+    global: Global,
 
     pub fn deinitSelf(self: *ModuleObject, allocator: Allocator) void {
         switch (self.*) {
             .function => |*v| {
+                v.deinit(allocator);
+            },
+            .global => |*v| {
                 v.deinit(allocator);
             },
         }

@@ -247,13 +247,17 @@ pub const TypeTable = struct {
         const extra_part = self.extra(named_type);
         const name = extra_part.named.name;
         // this must already exist from `internExtra`
-        try self.named_types.putAssumeCapacity(name, type_id);
+        self.named_types.putAssumeCapacity(name, type_id);
     }
 
     pub fn getNamed(self: *TypeTable, named_type: TypeId) ?TypeId {
         const extra_part = self.extra(named_type);
         const name = extra_part.named.name;
-        return try self.named_types.get(name)
+        return self.getNamedDirect(name);
+    }
+
+    pub fn getNamedDirect(self: *TypeTable, name: []const u8) ?TypeId {
+        return self.named_types.get(name)
             orelse unreachable; // exists in `self.named_type`,
     }
 

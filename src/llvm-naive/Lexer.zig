@@ -63,10 +63,18 @@ pub const Token = struct {
         define,
         target,
         source_filename,
+        @"type",
+        @"null",
+
+        constant,
+        global,
 
         // vectors
         vscale,
         x,
+
+        // arrays
+        c,
 
         // prefix
         prefix,
@@ -93,6 +101,9 @@ pub const Token = struct {
 
         @"addrspace",
 
+        alias,
+        ifunc,
+
         // --- begin_forget ---
 
         // Linkage Types
@@ -107,6 +118,11 @@ pub const Token = struct {
         linkonce_odr,
         weak_odr,
         external,
+
+        // TLS
+        thread_local,
+
+        externally_initialized,
 
         // Visibility
         default,
