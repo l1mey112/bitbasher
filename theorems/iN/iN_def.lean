@@ -1,10 +1,9 @@
-import theorems.Core.PNat.PNat
 import theorems.iN.SimpSets
 
 /--
 LLVM-style integers with poison value.
 -/
-inductive iN (bits : PNat) : Type where
+inductive iN (bits : Nat) : Type where
   | bitvec : BitVec bits → iN bits
   | poison : iN bits
 
@@ -40,13 +39,31 @@ abbrev i128 := iN 128
 instance : OfNat (iN n) val where
   ofNat := iN.bitvec (BitVec.ofNat n val)
 
-/-- Theorem for normalising the iN literal representation. -/
+/--
+Pick a value for poison. If `x` is poison, return `value`. Otherwise return `x`.
+
+LangRef: https://llvm.org/docs/LangRef.html#poison-values
+-/
+def iN.liftPoison {n} (x value : iN n) : iN n :=
+  match x with
+  | poison => value
+  | _ => x
+
+/- /-- Theorem for normalising the iN literal representation. -/
 @[simp]
 theorem iN.ofNat_eq_bitvec {n : PNat} (val : Nat) :
-  ((no_index OfNat.ofNat val) : iN n) = bitvec (no_index OfNat.ofNat val) := rfl
+  ((no_index OfNat.ofNat val) : iN n) = bitvec (no_index OfNat.ofNat val) := rfl -/
 
 /-- Macro for matching iN literals in simp-theorems. The normal form that is matched is `iN.ofNat_eq_bitvec`. -/
 macro "lit(" val:term ")" : term => `(no_index bitvec (BitVec.ofNat _ $val))
+
+macro "ofNat(" n:term ")" : term => `(no_index (OfNat.ofNat $n))
+
+
+
+/- @OfNat.ofNat PNat 32  -/
+
+/- BitVec.ofNat (↑32) 2 : BitVec ↑32 -/
 
 /--
 The integer sum of both operands. If the sum overflows, the result is returned modulo 2ⁿ.
@@ -60,7 +77,7 @@ protected def iN.add {n} : iN n → iN n → iN n
   | bitvec a, bitvec b => bitvec (a + b)
 
 @[iN_to_bitvec]
-protected def iN.addNswBV {n : PNat} (a b : BitVec n) : iN n :=
+protected def iN.addNswBV {n : Nat} (a b : BitVec n) : iN n :=
   if BitVec.saddOverflow a b then
     poison
   else
@@ -78,7 +95,7 @@ protected def iN.addNsw {n} : iN n → iN n → iN n
   | bitvec a, bitvec b => iN.addNswBV a b
 
 @[iN_to_bitvec]
-protected def iN.addNuwBV {n : PNat} (a b : BitVec n) : iN n :=
+protected def iN.addNuwBV {n : Nat} (a b : BitVec n) : iN n :=
   if BitVec.uaddOverflow a b then
     poison
   else
@@ -96,7 +113,7 @@ protected def iN.addNuw {n} : iN n → iN n → iN n
   | bitvec a, bitvec b => iN.addNuwBV a b
 
 @[iN_to_bitvec]
-protected def iN.addNwBV {n : PNat} (a b : BitVec n) : iN n :=
+protected def iN.addNwBV {n : Nat} (a b : BitVec n) : iN n :=
   if BitVec.saddOverflow a b || BitVec.uaddOverflow a b then
     poison
   else
@@ -132,7 +149,7 @@ protected def iN.sub {n} : iN n → iN n → iN n
   | bitvec a, bitvec b => bitvec (a - b)
 
 @[iN_to_bitvec]
-protected def iN.subNswBV {n : PNat} (a b : BitVec n) : iN n :=
+protected def iN.subNswBV {n : Nat} (a b : BitVec n) : iN n :=
   if BitVec.ssubOverflow a b then
     poison
   else
@@ -150,7 +167,7 @@ protected def iN.subNsw {n} : iN n → iN n → iN n
   | bitvec a, bitvec b => iN.subNswBV a b
 
 @[iN_to_bitvec]
-protected def iN.subNuwBV {n : PNat} (a b : BitVec n) : iN n :=
+protected def iN.subNuwBV {n : Nat} (a b : BitVec n) : iN n :=
   if BitVec.usubOverflow a b then
     poison
   else
@@ -168,7 +185,7 @@ protected def iN.subNuw {n} : iN n → iN n → iN n
   | bitvec a, bitvec b => iN.subNuwBV a b
 
 @[iN_to_bitvec]
-protected def iN.subNwBV {n : PNat} (a b : BitVec n) : iN n :=
+protected def iN.subNwBV {n : Nat} (a b : BitVec n) : iN n :=
   if BitVec.ssubOverflow a b || BitVec.usubOverflow a b then
     poison
   else
@@ -362,7 +379,7 @@ protected def iN.shl {n} : iN n → iN n → iN n
 -/
 
 @[iN_to_bitvec]
-protected def iN.shlNswClean {n : PNat} (a : BitVec n) (b : BitVec n) : iN n :=
+protected def iN.shlNswClean {n : Nat} (a : BitVec n) (b : BitVec n) : iN n :=
   let s := b.toNat
 
   if s ≥ n then

@@ -1,5 +1,6 @@
 import theorems.iN.SimpSets
 import theorems.iN.iN_def
+import theorems.iN.iN_tactics
 import theorems.Core.Attrs.Attrs
 
 namespace iN
@@ -12,7 +13,7 @@ theorem const_swap {u} (a b con1 con2 : BitVec u)
 
 
 -- Lifts a binary operation on BitVecs to iN, handling poison automatically.
-def iN.lift₂ {n : PNat} (f : BitVec n → BitVec n → BitVec n) : iN n → iN n → iN n
+/- def iN.lift₂ {n : PNat} (f : BitVec n → BitVec n → BitVec n) : iN n → iN n → iN n
   | poison,   _      => poison
   | _,        poison => poison
   | bitvec a, bitvec b => bitvec (f a b)
@@ -47,41 +48,61 @@ theorem sub_match_eta_lit {n} (x : iN n) (con : Nat) :
     | poison, _ => poison
     | _, poison => poison
     | bitvec a, bitvec b => bitvec (a - b)) = x - lit(con) := rfl
+ -/
+
+inductive Cases : (iN n) → Prop where
+  | one : Cases (12 : iN n)
+  | two : Cases (poison)
+
+theorem forge12 {n} (x : iN n) (h : Cases x)
+    : x = 12 := by
+
+  cases h
+  case one => rfl
+  case two =>
+    sorry
+
 
 /--  -/
 --@[rewrite, simp]
 theorem const_swap {n} (x y : iN n) (con1 con2 : Nat)
-    : (a + lit(con1)) - (b + lit(con1)) = (a - b) + (lit(con1) - lit(con1)) := by
+    : (x + lit(con1)) - (y + lit(con1)) = (x - y) + (lit(con1) - lit(con1)) := by
 
+  let lhs : iN n := (x + lit(con1)) - (y + lit(con1))
+  let rhs : iN n := (x - y) + (lit(con1) - lit(con1))
+
+  apply iN.liftPoison lhs rhs
   simp [iN_to_bitvec, *] at *
-    /-
-    bits✝ : PNat
-    a b : iN bits✝
-    n : PNat
-    x y : iN n
-    con1 con2 : Nat
-    ⊢ (match
-        match a, bitvec (BitVec.ofNat (↑bits✝) con1) with
-        | poison, x => poison
-        | x, poison => poison
-        | bitvec a, bitvec b => bitvec (a + b),
-        match b, bitvec (BitVec.ofNat (↑bits✝) con1) with
-        | poison, x => poison
-        | x, poison => poison
-        | bitvec a, bitvec b => bitvec (a + b) with
+
+
+  /-
+  bits✝ : PNat
+  a b : iN bits✝
+  n : PNat
+  x y : iN n
+  con1 con2 : Nat
+  ⊢ (match
+      match a, bitvec (BitVec.ofNat (↑bits✝) con1) with
       | poison, x => poison
       | x, poison => poison
-      | bitvec a, bitvec b => bitvec (a - b)) =
-      match
-        match a, b with
-        | poison, x => poison
-        | x, poison => poison
-        | bitvec a, bitvec b => bitvec (a - b),
-        bitvec 0#↑bits✝ with
+      | bitvec a, bitvec b => bitvec (a + b),
+      match b, bitvec (BitVec.ofNat (↑bits✝) con1) with
       | poison, x => poison
       | x, poison => poison
-      | bitvec a, bitvec b => bitvec (a + b)
-    -/
+      | bitvec a, bitvec b => bitvec (a + b) with
+    | poison, x => poison
+    | x, poison => poison
+    | bitvec a, bitvec b => bitvec (a - b)) =
+    match
+      match a, b with
+      | poison, x => poison
+      | x, poison => poison
+      | bitvec a, bitvec b => bitvec (a - b),
+      bitvec 0#↑bits✝ with
+    | poison, x => poison
+    | x, poison => poison
+    | bitvec a, bitvec b => bitvec (a + b)
+  -/
 
 
 end iN
