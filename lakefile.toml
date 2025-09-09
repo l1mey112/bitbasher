@@ -1,0 +1,10 @@
+name = "playground"
+defaultTargets = ["theorems"]
+
+[[lean_lib]]
+name = "theorems"
+
+[[lean_exe]]
+name = "extract_theorems"
+root = "scripts.extract_theorems"
+supportInterpreter = true
