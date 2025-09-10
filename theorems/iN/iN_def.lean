@@ -7,26 +7,6 @@ inductive iN (bits : Nat) : Type where
   | bitvec : BitVec bits → iN bits
   | poison : iN bits
 
-/-
-There are multiple ways to deal with `BitVec 0`
-
-1. Adjust the definitions of the operators to work on `BitVec n`, but always return
-   zero on any operation if involving `BitVec 0`.
-    - For example "division by `0` in `iN 0` is defined to be `0`, not poison."
-    - This complicates proofs, as you need to consider `poison : BitVec 0`, which
-      should never be constructible.
-      In automated proofs you can end up with `⊢ poison = 0` goals that it can't dispell.
-
-2. Adjust the definitions, but make poison take in a proof that `bits != 0`, so:
-   `poison : (h : bits != 0) → iN bits`
-    - This is also complicates every facet of proof writing.
-
-3. Adjust the definitions of the operators to take in `{h : n != 0} → iN n`.
-    - This seems okay, as the rewrite rules/matchers can supply `h : n != 0`, and
-      it being implicit means that Lean can just infer it.
-    - This might be the best to facilitate automated proofs.
--/
-
 export iN (poison bitvec)
 
 abbrev i1 := iN 1
@@ -57,9 +37,9 @@ theorem iN.ofNat_eq_bitvec {n : PNat} (val : Nat) :
 /-- Macro for matching iN literals in simp-theorems. The normal form that is matched is `iN.ofNat_eq_bitvec`. -/
 macro "lit(" val:term ")" : term => `(no_index bitvec (BitVec.ofNat _ $val))
 
-macro "ofNat(" n:term ")" : term => `(no_index (OfNat.ofNat $n))
+/- macro "ofNat(" n:term ")" : term => `(no_index (OfNat.ofNat $n))
 
-
+ -/
 
 /- @OfNat.ofNat PNat 32  -/
 
@@ -70,7 +50,7 @@ The integer sum of both operands. If the sum overflows, the result is returned m
 
 LangRef: https://llvm.org/docs/LangRef.html#add-instruction
 -/
-@[iN_to_bitvec]
+@[iN_to_bitvec, iN_unwrap_poison]
 protected def iN.add {n} : iN n → iN n → iN n
   | poison, _ => poison
   | _, poison => poison
@@ -132,6 +112,12 @@ protected def iN.addNw {n} : iN n → iN n → iN n
 
 instance : Add (iN n) where
   add := iN.add
+
+--attribute [iN_unwrap_poison, iN_to_bitvec] iN.add
+
+@[iN_to_bitvec, iN_unwrap_poison]
+private theorem iN.add_rewrite_proper {n} {x y : iN n} :
+  x + y = iN.add x y := rfl
 
 @[inherit_doc] infixl:65 " +nsw " => iN.addNsw
 @[inherit_doc] infixl:65 " +nuw " => iN.addNuw

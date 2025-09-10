@@ -1,7 +1,7 @@
 import theorems.iN.iN_def
 import theorems.iN.iN_rewrite
 
-@[simp]
+/- @[simp]
 theorem poison_forge_12 {n} : (poison : iN n) ~> 12 := by
   exact Rewrite.poison_forge 12
 
@@ -39,4 +39,4 @@ theorem signed_overflow_is_12 :
   have h1 : BitVec.saddOverflow INT32_MAX 1 = true := by
     decide
 
-  simp [iN_to_bitvec, *] at *
+  simp [iN_to_bitvec, *] at * -/

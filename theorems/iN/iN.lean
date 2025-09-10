@@ -1,4 +1,6 @@
-import theorems.iN.iN_def
 import theorems.iN.SimpSets
-
-import theorems.iN_normal.iN_normal
+import theorems.iN.iN_def
+import theorems.iN.iN_tactics
+import theorems.iN.iN_lemmas
+import theorems.iN.iN_rewrite
+import theorems.Core.Attrs.Attrs

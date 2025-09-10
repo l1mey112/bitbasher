@@ -1,6 +1,6 @@
 import Lean
 
-structure Rewrite where
+structure Match where
 
 deriving Lean.ToJson, Lean.FromJson, Inhabited
 

@@ -4,7 +4,7 @@ import theorems.Core.Attrs.Match
 open Lean Parser Elab
 
 inductive EntryVariant where
-  | rewrite : Rewrite → EntryVariant
+  | rewrite : Match → EntryVariant
 deriving Lean.ToJson, Lean.FromJson, Inhabited
 
 structure Entry where
@@ -21,7 +21,7 @@ initialize entries : SimplePersistentEnvExtension Entry (Array Entry) ←
     addEntryFn    := Array.push
   }
 
-def parseRewrite (type : Expr) : MetaM (Option Rewrite) := do
+def parseMatch (type : Expr) : MetaM (Option Match) := do
   /- forall {u : Nat} (a : BitVec u) (b : BitVec u) (con1 : BitVec u) (con2 : BitVec u), Eq.{1} (BitVec u) (...) (...) -/
 
   logInfo s!"{type}"
@@ -46,7 +46,7 @@ def parseRewrite (type : Expr) : MetaM (Option Rewrite) := do
       parse rhs g magma lhsv true
     | _ => return none -/
 
-  return Rewrite.mk
+  return Match.mk
 
 initialize rewriteAttr : Unit ←
   registerBuiltinAttribute {
@@ -64,8 +64,8 @@ initialize rewriteAttr : Unit ←
         let info ← getConstInfo declName
         let entry: Entry ← match info with
             | .thmInfo  (val : TheoremVal) =>
-              if let some rewrite ← parseRewrite val.type then
-                pure <| ⟨val.name, filename, line, .rewrite rewrite⟩
+              if let some thing ← parseMatch val.type then
+                pure <| ⟨val.name, filename, line, .rewrite thing⟩
               else
                 throwError "failed to match type of @[rewrite] theorem"
             | _ => throwError "@[rewrite] is only allowed on theorems"
