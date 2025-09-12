@@ -23,6 +23,8 @@ abbrev RewriteIff {n} (x y : iN n) := Rewrite x y ∧ Rewrite y x
 @[inherit_doc] infix:50 " <~ "  => RewriteReverse
 @[inherit_doc] infix:50 " <~> " => RewriteIff
 
+namespace Rewrite
+
 /-- Poison can be rewritten to anything. -/
 @[simp, grind]
 theorem rewrite_poison {n} (x : iN n)
@@ -34,9 +36,25 @@ theorem rewrite_poison {n} (x : iN n)
   case poison =>
     exact Rewrite.refl poison
 
+/-- Poison can be rewritten to anything. -/
+@[simp, grind]
+theorem not_bitvec_poision_rewrite {n} (a : BitVec n)
+    : ¬bitvec a ~> poison := by
+
+  intro h
+  cases h
+
 @[refl, simp]
 theorem rewrite_refl {n} {x : iN n}
     : x <~> x := by
+
+  constructor <;> exact Rewrite.refl x
+
+@[refl, simp]
+theorem rewrite_refl2 {n} {x : iN n}
+    : Rewrite x x ∧ Rewrite x x := by
+
+  -- this handles cases after the `abbrev` is unwrapped
 
   constructor <;> exact Rewrite.refl x
 
@@ -56,9 +74,8 @@ theorem eq_rewrite {n} {x y : iN n}
 
   intro h
   rw [h]
-  constructor <;> exact Rewrite.refl y
 
-@[grind]
+@[grind, simp ←]
 theorem eq_iff_rewrite_bitvec {n} {a b : BitVec n}
     : (a = b) ↔ (bitvec a <~> bitvec b) := by
 
@@ -66,9 +83,6 @@ theorem eq_iff_rewrite_bitvec {n} {a b : BitVec n}
   case mp =>
     intro h
     rw [h]
-    constructor
-    case left => exact Rewrite.refl (bitvec b)
-    case right => exact Rewrite.refl (bitvec b)
   case mpr =>
     intro h
     cases h with
@@ -76,3 +90,19 @@ theorem eq_iff_rewrite_bitvec {n} {a b : BitVec n}
       cases hab
       cases hba
       rfl
+
+@[simp, grind]
+theorem rewrite_bitvec {n} (a b : BitVec n)
+    : (bitvec a ~> bitvec b) ↔ a = b := by
+
+  constructor
+  case mp =>
+    intro h
+    cases h
+    case refl => rfl
+  case mpr =>
+    intro h
+    rw [h]
+    exact Rewrite.refl (bitvec b)
+
+end Rewrite
