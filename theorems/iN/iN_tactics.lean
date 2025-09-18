@@ -35,23 +35,54 @@ simproc ↓ shortCircuitAnd (And _ _) := fun e => do
   -- va : (n : Nat) × BitVec n
   -- vb : (n : Nat) × BitVec n
 
-
   let expr := mkApp2 (mkConst ``iN.bitvec) (an) (mkApp3 (mkConst ``ite) v a b)
   return .done { expr := expr, proof? := none } -/
 
-/-- `poison_unroll x y z => a b c`
+/- /-- `poison_unroll x y z => a b c`
 
 Performs `cases x; cases y; cases z`, solves every `poison` branch with
 `simp [iN_unwrap_inst]`, and in the unique `bitvec` branch introduces the
 payloads named `a b c`. -/
 syntax "poison_unroll" (ppSpace colGt ident)* " =>" (ppSpace colGt ident)* : tactic
-
 macro_rules
-| `(tactic| poison_unroll $xs:ident* => $ys:ident*) =>
-  `(tactic|
-    ($[cases $xs:ident with
-      | bitvec $ys:ident => ?_
-      | poison => simp [iN_unwrap_inst]];*))
+| `(tactic| poison_unroll $xs:ident* => $ys:ident*) => do
+
+  unless xs.size == ys.size do
+    Macro.throwError s!"poison_unroll: got {xs.size} variables but {ys.size} names"
+
+  let rec go (i : Nat) : MacroM (TSyntax `tactic) := do
+    if i < xs.size then
+      let xi := xs[i]!
+      let yi := ys[i]!
+      -- Recursively build the tactic for the inner levels
+      let innerTactic ← go (i + 1)
+
+      -- Use the standard `cases ... with` syntax, which correctly handles scoping.
+      -- The `innerTactic` is now placed *inside* the `bitvec` branch's scope.
+      `(tactic|
+        cases $xi:ident with
+        | bitvec $yi => $innerTactic:tactic
+        | poison => simp [iN_unwrap_inst])
+    else
+      -- The base case when all variables have been processed.
+      `(tactic| skip)
+
+  go 0 -/
+
+--syntax "poison_unroll" (ppSpace colGt ident)* " =>" (ppSpace colGt ident)* : tactic
+
+elab "poison_unroll" xs:(ppSpace colGt ident)* " =>" as:(ppSpace colGt ident)* : tactic => do
+
+  unless xs.size == as.size do
+    throwError s!"poison_unroll: got {xs.size} variables but {as.size} names"
+
+  (xs.zip as).forM $ fun (x, a) => do
+    evalTactic (← `(tactic| by_cases ($x).poison))
+    evalTactic (← `(tactic| . simp [iN_unwrap_inst, *]))
+    evalTactic (← `(tactic| let $a := ($x).bitvec))
+
+  evalTactic (← `(tactic| simp [iN_unwrap_inst, *]))
+
 
 /- macro_rules
 | `(tactic| poison_unroll $xs:ident* => $ys:ident*) => do

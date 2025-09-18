@@ -63,7 +63,7 @@ theorem BitVec.uaddOverflow_chain_assoc {n} {hn : Bits n} (a b c : BitVec n)
 
 namespace iN
 
-@[simp, grind =]
+/- @[simp, grind =]
 theorem eq_bitvec_inj {n} {a b : BitVec n} :
     ((bitvec a : iN n) = (bitvec b : iN n)) ↔ a = b := by
 
@@ -71,7 +71,7 @@ theorem eq_bitvec_inj {n} {a b : BitVec n} :
   · intro h
     injection h
   . intro h
-    rw [h]
+    rw [h] -/
 
 @[simp]
 theorem poisonWrapper_poison_left {n} {k} {g : BitVec n → BitVec n → iN k} {b : iN n} :
@@ -79,23 +79,45 @@ theorem poisonWrapper_poison_left {n} {k} {g : BitVec n → BitVec n → iN k} {
 
 @[simp]
 theorem poisonWrapper_poison_right {n} {k} {g : BitVec n → BitVec n → iN k} {a : iN n} :
-  iN.poisonWrapper g a poison = poison := by cases a <;> rfl
+  iN.poisonWrapper g a poison = poison := by simp [iN.poisonWrapper]
 
-@[simp]
+/- @[simp]
 theorem poisonWrapper_bitvec_left {n} {k} {g : BitVec n → BitVec n → iN k} {a : BitVec n} {b : iN n} :
-  iN.poisonWrapper g (bitvec a) b = match b with
-    | poison => poison
-    | bitvec b' => g a b' := by cases b <;> rfl
+  iN.poisonWrapper g (bitvec a) b = if b.poison then
+      poison
+    else
+      g a b.bitvec := by simp [iN.poisonWrapper]
 
 @[simp]
 theorem poisonWrapper_bitvec_right {n} {k} {g : BitVec n → BitVec n → iN k} {a : iN n} {b : BitVec n} :
-  iN.poisonWrapper g a (bitvec b) = match a with
-    | poison => poison
-    | bitvec a' => g a' b := by cases a <;> rfl
+  iN.poisonWrapper g a (bitvec b) = if a.poison then
+      poison
+    else
+      g a.bitvec b := by simp [iN.poisonWrapper]
 
 @[simp]
 theorem poisonWrapper_bitvec {n} {k} {g : BitVec n → BitVec n → iN k} {a b : BitVec n} :
-  iN.poisonWrapper g (bitvec a) (bitvec b) = g a b := by cases a <;> rfl
+  iN.poisonWrapper g (bitvec a) (bitvec b) = g a b := by cases a <;> rfl -/
+
+-- there is no normal form for `bitvec a` anymore
+
+@[simp]
+theorem poisonWrapper_bitvec_left {n} {k} {g : BitVec n → BitVec n → iN k} {a b : iN n} {h: ¬a.poison = true} :
+  iN.poisonWrapper g a b = if b.poison then
+      poison
+    else
+      g a.bitvec b.bitvec := by simp [iN.poisonWrapper, h]
+
+@[simp]
+theorem poisonWrapper_bitvec_right {n} {k} {g : BitVec n → BitVec n → iN k} {a b : iN n} {h: ¬b.poison = true} :
+  iN.poisonWrapper g a b = if a.poison then
+      poison
+    else
+      g a.bitvec b.bitvec := by simp [iN.poisonWrapper, h]
+
+@[simp]
+theorem poisonWrapper_bitvec {n} {k} {g : BitVec n → BitVec n → iN k} {a b : iN n} {h₁: ¬a.poison = true} {h₂: ¬b.poison = true} :
+  iN.poisonWrapper g a b = g a.bitvec b.bitvec := by simp [iN.poisonWrapper, h₁, h₂]
 
 /-- Simplifying lemma about poisonable equations of the form `(a ⋄₁ b) ⋄₂ c`. -/
 @[simp]
@@ -105,9 +127,10 @@ theorem poisonPreconditions_match_wrapper_assoc_left {n}
     (a b c : BitVec n)
     (op₁ : BitVec n → BitVec n → BitVec n)
     (op₂ : BitVec n → BitVec n → BitVec n)
-    : (match iN.poisonPreconditions isPoison₁ op₁ a b with
-      | poison => poison
-      | bitvec ab' => iN.poisonPreconditions isPoison₂ op₂ ab' c)
+    : (if (iN.poisonPreconditions isPoison₁ op₁ a b).poison then
+        poison
+      else
+        iN.poisonPreconditions isPoison₂ op₂ (iN.poisonPreconditions isPoison₁ op₁ a b).bitvec c)
 
       = bif isPoison₁ a b || isPoison₂ (op₁ a b) c then
         poison
@@ -127,9 +150,10 @@ theorem poisonPreconditions_match_wrapper_assoc_right {n}
     (a b c : BitVec n)
     (op₁ : BitVec n → BitVec n → BitVec n)
     (op₂ : BitVec n → BitVec n → BitVec n)
-    : (match iN.poisonPreconditions isPoison₂ op₂ b c with
-      | poison => poison
-      | bitvec bc' => iN.poisonPreconditions isPoison₁ op₁ a bc')
+    : (if (iN.poisonPreconditions isPoison₂ op₂ b c).poison then
+        poison
+      else
+        iN.poisonPreconditions isPoison₁ op₁ a (iN.poisonPreconditions isPoison₂ op₂ b c).bitvec)
 
       = bif isPoison₂ b c || isPoison₁ a (op₂ b c) then
         poison
@@ -141,10 +165,16 @@ theorem poisonPreconditions_match_wrapper_assoc_right {n}
   . simp
   . simp
 
-@[simp]
+/- @[simp]
 theorem bitvec_cond {n} (c : Bool) (t e : BitVec n) :
     cond c (bitvec t) (bitvec e) = bitvec (cond c t e) := by
-  cases c <;> rfl
+  cases c <;> rfl -/
+
+@[simp]
+theorem bitvec_cond {n} (c : Bool) (t e : iN n)
+    {ht : ¬t.poison = true} {he : ¬e.poison = true} :
+    cond c t e = bitvec (cond c t.bitvec e.bitvec) := by
+  cases c <;> simp [*] at *
 
 /-- Forces unfolds when about to be simplified -/
 @[simp]

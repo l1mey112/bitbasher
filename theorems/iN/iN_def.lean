@@ -3,11 +3,14 @@ import theorems.iN.SimpSets
 /--
 LLVM-style integers with poison value.
 -/
-inductive iN (bits : Nat) : Type where
-  | bitvec : BitVec bits → iN bits
-  | poison : iN bits
+structure iN (bits : Nat) : Type where
+  protected bitvec : BitVec bits
+  protected poison : Bool
 
-export iN (poison bitvec)
+  protected poison_inv : poison → bitvec = 0
+
+def poison {n : Nat} : iN n := ⟨0, true, by simp⟩
+def bitvec {n : Nat} (value : BitVec n) : iN n := ⟨value, false, by simp⟩
 
 abbrev i1 := iN 1
 abbrev i8 := iN 8
@@ -17,25 +20,85 @@ abbrev i64 := iN 64
 abbrev i128 := iN 128
 
 instance : OfNat (iN n) val where
-  ofNat := iN.bitvec (BitVec.ofNat n val)
+  ofNat := bitvec (BitVec.ofNat n val)
 
 instance : Coe Bool (iN 1) where
-  coe b := bif b then iN.bitvec 1 else iN.bitvec 0
+  coe b := bif b then bitvec 1 else bitvec 0
 
 instance : Coe (BitVec n) (iN n) where
-  coe b := iN.bitvec b
+  coe b := bitvec b
 
 @[simp]
 theorem ofNat_eq_bitvec_ofNat {n val} :
-  (no_index (OfNat.ofNat val) : iN n) = iN.bitvec (BitVec.ofNat n val) := rfl
+  (no_index (OfNat.ofNat val) : iN n) = bitvec (BitVec.ofNat n val) := rfl
 
 /-- Macro for matching iN literals in simp-theorems. The normal form that is matched is `iN.ofNat_eq_bitvec`. -/
 macro "lit(" val:term ")" : term => `(no_index bitvec (BitVec.ofNat _ $val))
 
-protected def iN.poisonWrapper {n} {k} (g : BitVec n → BitVec n → iN k) : iN n → iN n → iN k
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b => g a b
+@[simp, grind]
+theorem poison_poison {n}
+    : (poison : iN n).poison = true := by
+
+  unfold poison
+  simp
+
+@[simp, grind]
+theorem bitvec_poison {n} (a : BitVec n)
+    : (bitvec a).poison = false := by
+
+  unfold bitvec
+  simp
+
+@[simp, grind]
+theorem bitvec_bitvec {n} (a : BitVec n)
+    : (bitvec a).bitvec = a := by
+
+  unfold bitvec
+  simp
+
+@[simp, grind]
+theorem poison_norm {n} (x : iN n) {h : x.poison = true}
+    : x = poison := by
+
+  obtain ⟨x_bitvec, is_poison, poison_inv⟩ := x
+  have h' : x_bitvec = 0 := poison_inv h
+
+  subst h'
+  subst h
+  rfl
+
+@[simp, grind]
+theorem bitvec_eq {n} (x : iN n) {h : ¬x.poison = true}
+    : bitvec x.bitvec = x := by
+
+  obtain ⟨x_bitvec, is_poison, poison_inv⟩ := x
+  unfold bitvec
+  simp [*] at *
+  exact h
+
+-- normalisation like this isn't the right way to go as,
+-- you force unwrapping of structures using `obtain`.
+
+/- @[simp]
+theorem bitvec_norm {n} (x : iN n) (a : BitVec n)
+    {h : ¬x.poison = true}
+    {ha : x.bitvec = a}
+    : x = bitvec a := by
+
+  obtain ⟨x_bitvec, _, _⟩ := x
+  simp at ha
+  simp at h
+  simp only [bitvec, iN.mk.injEq]
+  exact And.intro ha h -/
+
+-- if at any point, you access `poison.bitvec`, this is an error
+-- from the definitions. this should never be reached
+
+protected def iN.poisonWrapper {n} {k} (g : BitVec n → BitVec n → iN k) (x y : iN n) : iN k :=
+  if x.poison ∨ y.poison then
+    poison
+  else
+    g x.bitvec y.bitvec
 
 protected def iN.poisonPreconditions {n}
     (isPoison : BitVec n → BitVec n → Bool) (g : BitVec n → BitVec n → BitVec n)

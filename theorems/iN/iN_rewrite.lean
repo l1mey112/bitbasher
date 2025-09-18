@@ -3,16 +3,12 @@ import theorems.iN.iN_def
 /--
 `Rewrite x y` means the value `x` can be rewritten into the value `y`.
 -/
-inductive Rewrite {n} : iN n → iN n → Prop where
-  /-- A value rewrites to itself. -/
-  | refl (x : iN n) : Rewrite x x
-  /-- Poison can be rewritten into any concrete value. -/
-  | poison_forge (v : BitVec n) : Rewrite poison (bitvec v)
+def Rewrite {n : Nat} (x y : iN n) : Prop :=
+  /- A value rewrites to itself. -/
+  (¬x.poison ∧ ¬y.poison ∧ x.bitvec = y.bitvec) ∨
 
-/--
-`RewriteReverse x y` means the value `y` can be rewritten into the value `x`.
--/
-abbrev RewriteReverse {n} (x y : iN n) := Rewrite y x
+  /- (or) Poison can be rewritten into anything. -/
+  (x.poison)
 
 /--
 `RewriteIff x y` means `x` can be rewritten into `y` and `y` can be rewritten into `x`.
@@ -20,7 +16,6 @@ abbrev RewriteReverse {n} (x y : iN n) := Rewrite y x
 abbrev RewriteIff {n} (x y : iN n) := Rewrite x y ∧ Rewrite y x
 
 @[inherit_doc] infix:50 " ~> "  => Rewrite
-@[inherit_doc] infix:50 " <~ "  => RewriteReverse
 @[inherit_doc] infix:50 " <~> " => RewriteIff
 
 namespace Rewrite
@@ -30,43 +25,34 @@ namespace Rewrite
 theorem rewrite_poison {n} (x : iN n)
     : poison ~> x := by
 
-  cases x
-  case bitvec a =>
-    exact Rewrite.poison_forge a
-  case poison =>
-    exact Rewrite.refl poison
+  simp [Rewrite]
 
 /-- Poison can be rewritten to anything. -/
 @[simp, grind]
 theorem not_bitvec_poision_rewrite {n} (a : BitVec n)
     : ¬bitvec a ~> poison := by
 
-  intro h
-  cases h
+  simp [Rewrite]
 
 @[refl, simp]
 theorem rewrite_refl {n} {x : iN n}
     : x <~> x := by
 
-  constructor <;> exact Rewrite.refl x
+  simp [Rewrite]
 
 @[refl, simp]
 theorem rewrite_refl2 {n} {x : iN n}
     : Rewrite x x ∧ Rewrite x x := by
 
   -- this handles cases after the `abbrev` is unwrapped
+  simp [Rewrite]
 
-  constructor <;> exact Rewrite.refl x
-
-@[grind →]
+@[grind →, simp]
 theorem rewrite_trans {n} {x y z : iN n}
     {hx : x ~> y} {hy : y ~> z} : x ~> z := by
 
-  cases hx
-  case refl =>
-    exact hy
-  case poison_forge v =>
-    exact rewrite_poison z
+  simp [Rewrite] at *
+  grind
 
 @[grind]
 theorem eq_rewrite {n} {x y : iN n}
@@ -87,9 +73,8 @@ theorem eq_iff_rewrite_bitvec {n} {a b : BitVec n}
     intro h
     cases h with
     | intro hab hba =>
-      cases hab
-      cases hba
-      rfl
+      simp [Rewrite] at hab
+      exact hab
 
 @[simp, grind]
 theorem rewrite_bitvec {n} (a b : BitVec n)
@@ -98,11 +83,11 @@ theorem rewrite_bitvec {n} (a b : BitVec n)
   constructor
   case mp =>
     intro h
-    cases h
-    case refl => rfl
+    simp [Rewrite] at h
+    exact h
   case mpr =>
     intro h
     rw [h]
-    exact Rewrite.refl (bitvec b)
+    simp
 
 end Rewrite
