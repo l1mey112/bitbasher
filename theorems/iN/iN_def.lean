@@ -9,13 +9,6 @@ inductive iN (bits : Nat) : Type where
 
 export iN (poison bitvec)
 
-abbrev i1 := iN 1
-abbrev i8 := iN 8
-abbrev i16 := iN 16
-abbrev i32 := iN 32
-abbrev i64 := iN 64
-abbrev i128 := iN 128
-
 instance : OfNat (iN n) val where
   ofNat := iN.bitvec (BitVec.ofNat n val)
 
@@ -25,494 +18,170 @@ instance : Coe Bool (iN 1) where
 instance : Coe (BitVec n) (iN n) where
   coe b := iN.bitvec b
 
+namespace iN
+
 @[simp]
 theorem ofNat_eq_bitvec_ofNat {n val} :
   (no_index (OfNat.ofNat val) : iN n) = iN.bitvec (BitVec.ofNat n val) := rfl
 
-/-- Macro for matching iN literals in simp-theorems. The normal form that is matched is `iN.ofNat_eq_bitvec`. -/
-macro "lit(" val:term ")" : term => `(no_index bitvec (BitVec.ofNat _ $val))
+@[simp, grind =]
+theorem bitvec_inj {n} {a b : BitVec n} :
+    @Eq (no_index _) (bitvec a) (bitvec b) ↔ a = b := by
+  --  ((bitvec a : iN n) = (bitvec b : iN n)) ↔ a = b := by
 
-protected def iN.poisonWrapper {n} {k} (g : BitVec n → BitVec n → iN k) : iN n → iN n → iN k
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b => g a b
+  constructor
+  · intro h
+    injection h
+  . intro h
+    rw [h]
 
-protected def iN.poisonPreconditions {n}
-    (isPoison : BitVec n → BitVec n → Bool) (g : BitVec n → BitVec n → BitVec n)
-    (a b : BitVec n) : iN n :=
+@[simp]
+theorem poison_ne_bitvec {n} {a : BitVec n} :
+    @Ne (no_index _) (poison) (bitvec a) := by
+  --  (poison : iN n) ≠ (bitvec a : iN n) := by
 
-  if isPoison a b then poison else bitvec (g a b)
+  intro h
+  cases h
 
-/--
-Equality between two `iN` values, returning an `iN 1` (boolean) result.
+@[simp]
+theorem bitvec_ne_poison {n} {a : BitVec n} :
+    @Ne (no_index _) (bitvec a) (poison) := by
+  --  (bitvec a : iN n) ≠ (poison : iN n) := by
 
-LangRef: https://llvm.org/docs/LangRef.html#icmp-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.icmpEq {n} : iN n → iN n → iN 1 :=
-  iN.poisonWrapper (· == ·)
+  intro h
+  cases h
 
-/--
-LangRef: https://llvm.org/docs/LangRef.html#icmp-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.icmpNe {n} : iN n → iN n → iN 1 :=
-  iN.poisonWrapper (fun x1 x2 => decide (x1 != x2))
+@[simp]
+theorem ite_bitvec_bitvec {n} {c : Prop} [Decidable c] {a b : BitVec n} :
+    (if c then bitvec a else bitvec b : no_index _) = bitvec (if c then a else b) := by
+  split <;> rfl
 
-/--
-LangRef: https://llvm.org/docs/LangRef.html#icmp-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.icmpUlt {n} : iN n → iN n → iN 1 :=
-  iN.poisonWrapper (fun x1 x2 => decide (x1.toNat < x2.toNat))
+@[simp]
+theorem cond_bitvec_bitvec {n} (c : Bool) (t e : BitVec n) :
+    cond c (bitvec t) (bitvec e) = bitvec (cond c t e) := by
+  cases c <;> rfl
 
-/--
-LangRef: https://llvm.org/docs/LangRef.html#icmp-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.icmpUle {n} : iN n → iN n → iN 1 :=
-  iN.poisonWrapper (fun x1 x2 => decide (x1 ≤ x2))
-
-/--
-LangRef: https://llvm.org/docs/LangRef.html#icmp-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.icmpUgt {n} : iN n → iN n → iN 1 :=
-  iN.poisonWrapper (fun x1 x2 => decide (x1 > x2))
-
-/--
-LangRef: https://llvm.org/docs/LangRef.html#icmp-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.icmpUge {n} : iN n → iN n → iN 1 :=
-  iN.poisonWrapper (fun x1 x2 => decide (x1 ≥ x2))
-
-/--
-LangRef: https://llvm.org/docs/LangRef.html#icmp-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.icmpSlt {n} : iN n → iN n → iN 1 :=
-  iN.poisonWrapper (fun x1 x2 => x1.slt x2)
-
-/--
-LangRef: https://llvm.org/docs/LangRef.html#icmp-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.icmpSle {n} : iN n → iN n → iN 1 :=
-  iN.poisonWrapper (fun x1 x2 => x1.sle x2)
-
-/--
-LangRef: https://llvm.org/docs/LangRef.html#icmp-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.icmpSgt {n} : iN n → iN n → iN 1 :=
-  iN.poisonWrapper (fun x1 x2 => !x1.sle x2)
-
-/--
-LangRef: https://llvm.org/docs/LangRef.html#icmp-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.icmpSge {n} : iN n → iN n → iN 1 :=
-  iN.poisonWrapper (fun x1 x2 => !x1.slt x2)
-
-@[inherit_doc] infixl:55 " ==ᵤ " => iN.icmpEq
-@[inherit_doc] infixl:55 " !=ᵤ " => iN.icmpNe
-@[inherit_doc] infixl:55 " <ᵤ "  => iN.icmpUlt
-@[inherit_doc] infixl:55 " ≤ᵤ "  => iN.icmpUle
-@[inherit_doc] infixl:55 " >ᵤ "  => iN.icmpUgt
-@[inherit_doc] infixl:55 " ≥ᵤ "  => iN.icmpUge
-@[inherit_doc] infixl:55 " <ₛ "  => iN.icmpSlt
-@[inherit_doc] infixl:55 " ≤ₛ "  => iN.icmpSle
-@[inherit_doc] infixl:55 " >ₛ "  => iN.icmpSgt
-@[inherit_doc] infixl:55 " ≥ₛ "  => iN.icmpSge
-
-/--
-LangRef: https://llvm.org/docs/LangRef.html#and-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.and {n} : iN n → iN n → iN n :=
-  iN.poisonWrapper (· &&& ·)
-
-/--
-LangRef: https://llvm.org/docs/LangRef.html#or-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.or {n} : iN n → iN n → iN n :=
-  iN.poisonWrapper (· ||| ·)
-
-instance {n} : HAnd (iN n) (iN n) (iN n) where
-  hAnd := iN.and
-
-instance {n} : HOr (iN n) (iN n) (iN n) where
-  hOr := iN.or
-
-@[iN_unwrap_inst]
-protected def iN.addBV {n : Nat} (a b : BitVec n) : iN n :=
-  bitvec (a + b)
-
-/--
-The integer sum of both operands. If the sum overflows, the result is returned modulo 2ⁿ.
-
-LangRef: https://llvm.org/docs/LangRef.html#add-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.add {n} : iN n → iN n → iN n :=
-  iN.poisonWrapper iN.addBV
-
-@[iN_unwrap_inst]
-protected def iN.addNswBV {n : Nat} (a b : BitVec n) : iN n :=
-  iN.poisonPreconditions BitVec.saddOverflow (· + ·) a b
-
-/--
-The integer sum of both operands. If the signed sum overflows, poison is returned.
-
-LangRef: https://llvm.org/docs/LangRef.html#add-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.addNsw {n} : iN n → iN n → iN n :=
-  iN.poisonWrapper iN.addNswBV
-
-@[iN_unwrap_inst]
-protected def iN.addNuwBV {n : Nat} (a b : BitVec n) : iN n :=
-  iN.poisonPreconditions BitVec.uaddOverflow (· + ·) a b
-
-/--
-The integer sum of both operands. If the unsigned sum overflows, poison is returned.
-
-LangRef: https://llvm.org/docs/LangRef.html#add-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.addNuw {n} : iN n → iN n → iN n :=
-  iN.poisonWrapper iN.addNuwBV
-
-@[iN_unwrap_inst]
-protected def iN.addNwBV {n : Nat} (a b : BitVec n) : iN n :=
-  let isPoison := fun x y => BitVec.saddOverflow x y || BitVec.uaddOverflow x y
-  iN.poisonPreconditions isPoison (· + ·) a b
-
-/--
-The integer sum of both operands. If the sum overflows, poison is returned. Equivalent to `add nsw nuw`.
-
-LangRef: https://llvm.org/docs/LangRef.html#add-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.addNw {n} : iN n → iN n → iN n :=
-  iN.poisonWrapper iN.addNwBV
-
-instance : Add (iN n) where
-  add := iN.add
-
-@[inherit_doc] infixl:65 " +nsw " => iN.addNsw
-@[inherit_doc] infixl:65 " +nuw " => iN.addNuw
-@[inherit_doc] infixl:65 " +nw "  => iN.addNw
-
-/- /--
-The integer difference of both operands. If the difference overflows, the result is returned modulo 2ⁿ.
-
-LangRef: https://llvm.org/docs/LangRef.html#sub-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.sub {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b => bitvec (a - b)
-
-@[iN_unwrap_inst]
-protected def iN.subNswBV {n : Nat} (a b : BitVec n) : iN n :=
-  if BitVec.ssubOverflow a b then
-    poison
-  else
-    bitvec (a - b)
-
-/--
-The integer difference of both operands. If the signed difference overflows, poison is returned.
-
-LangRef: https://llvm.org/docs/LangRef.html#sub-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.subNsw {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b => iN.subNswBV a b
-
-@[iN_unwrap_inst]
-protected def iN.subNuwBV {n : Nat} (a b : BitVec n) : iN n :=
-  if BitVec.usubOverflow a b then
-    poison
-  else
-    bitvec (a - b)
-
-/--
-The integer difference of both operands. If the unsigned difference overflows, poison is returned.
-
-LangRef: https://llvm.org/docs/LangRef.html#sub-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.subNuw {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b => iN.subNuwBV a b
-
-@[iN_unwrap_inst]
-protected def iN.subNwBV {n : Nat} (a b : BitVec n) : iN n :=
-  if BitVec.ssubOverflow a b || BitVec.usubOverflow a b then
-    poison
-  else
-    bitvec (a - b)
-
-/--
-The integer difference of both operands. If the difference overflows, poison is returned. Equivalent to `sub nsw nuw`.
-
-LangRef: https://llvm.org/docs/LangRef.html#sub-instruction
--/
-@[iN_unwrap_inst]
-protected def iN.subNw {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b => iN.subNwBV a b
-
-instance : Sub (iN n) where
-  sub := iN.sub
-
-@[inherit_doc] infixl:65 " -nsw " => iN.subNsw
-@[inherit_doc] infixl:65 " -nuw " => iN.subNuw
-@[inherit_doc] infixl:65 " -nw "  => iN.subNw -/
-
-/- @[iN_unwrap_inst]
-protected def iN.sub {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b => a - b
-
-@[iN_unwrap_inst]
-protected def iN.sub_nsw {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b =>
-    if BitVec.ssubOverflow a b then
-      poison
-    else
-      a - b
-
-@[iN_unwrap_inst]
-protected def iN.sub_nuw {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b =>
-    if BitVec.usubOverflow a b then
-      poison
-    else
-      a - b -/
-
-/- @[iN_unwrap_inst]
-protected def iN.mul {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b => a * b
-
-@[iN_unwrap_inst]
-protected def iN.mul_nsw {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b =>
-    if BitVec.smulOverflow a b then
-      poison
-    else
-      a * b
-
-@[iN_unwrap_inst]
-protected def iN.mul_nuw {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b =>
-    if BitVec.umulOverflow a b then
-      poison
-    else
-      a * b
-
-@[iN_unwrap_inst]
-protected def iN.mul_nw {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b =>
-    if BitVec.smulOverflow a b || BitVec.umulOverflow a b then
-      poison
-    else
-      a * b
-
-@[iN_unwrap_inst]
-protected def iN.udiv {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b =>
-    if n = 0 then
-      0
-    else if b == 0 then
-      poison
-    else
-      a / b
-
-@[iN_unwrap_inst]
-protected def iN.sdiv {n} {z : n != 0} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b =>
-    have _ := z
-    if b == 0 || (a == BitVec.intMin n && b == -1) then
-      poison
-    else
-      a.sdiv b
-
-/-- Division by `0` in `iN 0` is defined to be `0`, not poison.  -/
-@[iN_unwrap_inst]
-protected def iN.udiv_exact {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b =>
-    if n = 0 then
-      0
-    else if b == 0 || a % b != 0 then
-      poison
-    else
-      a / b
-
-/-- Division by `0` in `iN 0` is defined to be `0`, not poison.  -/
-@[iN_unwrap_inst]
-protected def iN.sdiv_exact {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b =>
-    if n = 0 then
-      0
-    else if b == 0 || (a == BitVec.intMin n && b == -1) || a.srem b != 0 then
-      poison
-    else
-      a.sdiv b
-
-/-- Division by `0` in `iN 0` is defined to be `0`, not poison.  -/
-@[iN_unwrap_inst]
-protected def iN.urem {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b =>
-    if n = 0 then
-      0
-    else if b == 0 then
-      poison
-    else
-      a % b
-
-/-- Division by `0` in `iN 0` is defined to be `0`, not poison.  -/
-@[iN_unwrap_inst]
-protected def iN.srem {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b =>
-    if n = 0 then
-      0
-    else if b == 0 then
-      poison
-    else
-      a.srem b
-
-@[iN_unwrap_inst]
-protected def iN.and {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b => a &&& b
-
-@[iN_unwrap_inst]
-protected def iN.or {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b => a ||| b
-
-@[iN_unwrap_inst]
-protected def iN.xor {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b => a ^^^ b
-
-@[iN_unwrap_inst]
-protected def iN.shl {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b =>
-    let s := b.toNat
-    if n = 0 then
-      0
-    else if s >= n then
-      poison
-    else
-      a <<< s
+/-
+Because `iN` is not a monad, we don't have access to nice `>>=` notation.
 -/
 
-/- @[iN_unwrap_inst]
-protected def iN.shlNswClean {n : Nat} (a : BitVec n) (b : BitVec n) : iN n :=
-  let s := b.toNat
+def pBind {n m} (x : iN n) (f : BitVec n → iN m) : iN m :=
+  match x with
+  | poison => poison
+  | bitvec a => f a
 
-  if s ≥ n then
-    poison
-  else
-    let res := a <<< s
-    -- does the sign bit of the result differ from the sign bit of the original number?
-    if a.msb ≠ res.msb then
-      poison
-    else
-      bitvec res
+def pBind₂ {n m k} (x : iN n) (y : iN m) (f : BitVec n → BitVec m → iN k) : iN k :=
+  pBind x (fun a => pBind y (fun b => f a b))
 
-@[iN_unwrap_inst]
-protected def iN.shlNsw {n} : iN n → iN n → iN n
-  | poison, _ => poison
-  | _, poison => poison
-  | bitvec a, bitvec b => iN.shlNswClean a b -/
+@[simp]
+theorem poison_pBind {n m} {f : BitVec n → iN m} :
+  pBind poison f = poison := rfl
 
-section norm_eqs
-/-! These simp-lemmas rewrite the iN operations into equivalent notation -/
-@[grind =] theorem icmpEq_eq (x y : iN n) : iN.icmpEq x y = (x ==ᵤ y) := rfl
-@[grind =] theorem icmpNe_eq (x y : iN n) : iN.icmpNe x y = (x !=ᵤ y) := rfl
-@[grind =] theorem icmpUlt_eq (x y : iN n) : iN.icmpUlt x y = (x <ᵤ y) := rfl
-@[grind =] theorem icmpUle_eq (x y : iN n) : iN.icmpUle x y = (x ≤ᵤ y) := rfl
-@[grind =] theorem icmpUgt_eq (x y : iN n) : iN.icmpUgt x y = (x >ᵤ y) := rfl
-@[grind =] theorem icmpUge_eq (x y : iN n) : iN.icmpUge x y = (x ≥ᵤ y) := rfl
-@[grind =] theorem icmpSlt_eq (x y : iN n) : iN.icmpSlt x y = (x <ₛ y) := rfl
-@[grind =] theorem icmpSle_eq (x y : iN n) : iN.icmpSle x y = (x ≤ₛ y) := rfl
-@[grind =] theorem icmpSgt_eq (x y : iN n) : iN.icmpSgt x y = (x >ₛ y) := rfl
-@[grind =] theorem icmpSge_eq (x y : iN n) : iN.icmpSge x y = (x ≥ₛ y) := rfl
-@[grind =] theorem and_eq (x y : iN n) : iN.and x y = x &&& y := rfl
-@[grind =] theorem or_eq (x y : iN n) : iN.or x y = x ||| y := rfl
-@[grind =] theorem add_eq (x y : iN n) : iN.add x y = x + y := rfl
-@[grind =] theorem addNsw_eq (x y : iN n) : iN.addNsw x y = x +nsw y := rfl
-@[grind =] theorem addNuw_eq (x y : iN n) : iN.addNuw x y = x +nuw y := rfl
-@[grind =] theorem addNw_eq (x y : iN n) : iN.addNw x y = x +nw y := rfl
-/- @[simp, grind =] theorem sub_eq (x y : iN n) : iN.sub x y = x - y := rfl
-@[simp, grind =] theorem subNsw_eq (x y : iN n) : iN.subNsw x y = x -nsw y := rfl
-@[simp, grind =] theorem subNuw_eq (x y : iN n) : iN.subNuw x y = x -nuw y := rfl
-@[simp, grind =] theorem subNw_eq (x y : iN n) : iN.subNw x y = x -nw y := rfl -/
-end norm_eqs
+@[simp]
+theorem bitvec_pBind {n m} {a : BitVec n} {f : BitVec n → iN m} :
+  pBind (bitvec a) f = f a := rfl
 
-@[iN_unwrap_inst, grind =] theorem bitvec_addNsw_eq_thing (x y : BitVec n) : (bitvec x) +nsw (bitvec y) = iN.addNswBV x y := rfl
+@[simp]
+theorem pBind_poison {n m} {x : iN n} : pBind x (fun _ => (poison : iN m)) = poison := by
+  cases x <;> rfl
 
-section norm_eqs_to_bitvec
-/-! When using iN_unwrap_inst, these simp-lemmas rewrite the notation into back into iN, so they can be lowered -/
-@[iN_unwrap_inst, grind =] theorem bitvec_icmpEq_eq (x y : iN n) : (x ==ᵤ y) = iN.icmpEq x y := rfl
-@[iN_unwrap_inst, grind =] theorem bitvec_icmpNe_eq (x y : iN n) : (x !=ᵤ y) = iN.icmpNe x y := rfl
-@[iN_unwrap_inst, grind =] theorem bitvec_icmpUlt_eq (x y : iN n) : (x <ᵤ y) = iN.icmpUlt x y := rfl
-@[iN_unwrap_inst, grind =] theorem bitvec_icmpUle_eq (x y : iN n) : (x ≤ᵤ y) = iN.icmpUle x y := rfl
-@[iN_unwrap_inst, grind =] theorem bitvec_icmpUgt_eq (x y : iN n) : (x >ᵤ y) = iN.icmpUgt x y := rfl
-@[iN_unwrap_inst, grind =] theorem bitvec_icmpUge_eq (x y : iN n) : (x ≥ᵤ y) = iN.icmpUge x y := rfl
-@[iN_unwrap_inst, grind =] theorem bitvec_icmpSlt_eq (x y : iN n) : (x <ₛ y) = iN.icmpSlt x y := rfl
-@[iN_unwrap_inst, grind =] theorem bitvec_icmpSle_eq (x y : iN n) : (x ≤ₛ y) = iN.icmpSle x y := rfl
-@[iN_unwrap_inst, grind =] theorem bitvec_icmpSgt_eq (x y : iN n) : (x >ₛ y) = iN.icmpSgt x y := rfl
-@[iN_unwrap_inst, grind =] theorem bitvec_icmpSge_eq (x y : iN n) : (x ≥ₛ y) = iN.icmpSge x y := rfl
-@[iN_unwrap_inst, grind =] theorem bitvec_and_eq (x y : iN n) : x &&& y = iN.and x y := rfl
-@[iN_unwrap_inst, grind =] theorem bitvec_or_eq (x y : iN n) : x ||| y = iN.or x y := rfl
-@[iN_unwrap_inst, grind =] theorem bitvec_add_eq (x y : iN n) : x + y = iN.add x y := rfl
-@[iN_unwrap_inst, grind =] theorem bitvec_addNsw_eq (x y : iN n) : x +nsw y = iN.addNsw x y := rfl
-@[iN_unwrap_inst, grind =] theorem bitvec_addNuw_eq (x y : iN n) : x +nuw y = iN.addNuw x y := rfl
-@[iN_unwrap_inst, grind =] theorem bitvec_addNw_eq (x y : iN n) : x +nw y = iN.addNw x y := rfl
-/- @[iN_unwrap_inst, grind =] theorem bitvec_sub_eq (x y : iN n) : x - y = iN.sub x y := rfl
-@[iN_unwrap_inst, grind =] theorem bitvec_subNsw_eq (x y : iN n) : x -nsw y = iN.subNsw x y := rfl
-@[iN_unwrap_inst, grind =] theorem bitvec_subNuw_eq (x y : iN n) : x -nuw y = iN.subNuw x y := rfl
-@[iN_unwrap_inst, grind =] theorem bitvec_subNw_eq (x y : iN n) : x -nw y = iN.subNw x y := rfl -/
-end norm_eqs_to_bitvec
+@[simp]
+theorem pBind_if_then_poison_eq_ite_pBind {n m} {c : Prop} [Decidable c] {x : iN n} {f : BitVec n → iN m} :
+    pBind (if c then poison else x : no_index _) f = if c then poison else pBind x f := by
+  split <;> rfl
+
+@[simp]
+theorem pBind_if_else_poison_eq_ite_pBind {n m} {c : Prop} [Decidable c] {x : iN n} {f : BitVec n → iN m} :
+    pBind (if c then x else poison : no_index _) f = if c then pBind x f else poison := by
+  split <;> rfl
+
+@[simp]
+theorem pBind_cond_poison_left_eq_cond_pBind {n m} {c : Bool} {x : iN n} {f : BitVec n → iN m} :
+    pBind (cond c poison x) f = cond c poison (pBind x f) := by
+  cases c <;> rfl
+
+@[simp]
+theorem pBind_cond_poison_right_eq_cond_pBind {n m} {c : Bool} {x : iN n} {f : BitVec n → iN m} :
+    pBind (cond c x poison) f = cond c (pBind x f) poison := by
+  cases c <;> rfl
+
+@[simp]
+theorem pBind₂_poison_left {n m k} {y : iN m} {f : BitVec n → BitVec m → iN k} :
+  pBind₂ poison y f = poison := rfl
+
+@[simp]
+theorem pBind₂_poison_right {n m k} {x : iN n} {f : BitVec n → BitVec m → iN k} :
+    pBind₂ x poison f = poison := by
+  cases x <;> rfl
+
+@[simp]
+theorem pBind₂_bitvec_left {n m k} {a : BitVec n} {y : iN m} {f : BitVec n → BitVec m → iN k} :
+    pBind₂ (bitvec a) y f = pBind y (fun b => f a b) := rfl
+
+@[simp]
+theorem pBind₂_bitvec_right {n m k} {x : iN n} {b : BitVec m} {f : BitVec n → BitVec m → iN k} :
+    pBind₂ x (bitvec b) f = pBind x (fun a => f a b) := by
+  cases x <;> rfl
+
+@[simp]
+theorem pBind₂_bitvec_bitvec {n m k} {a : BitVec n} {b : BitVec m} {f : BitVec n → BitVec m → iN k} :
+    pBind₂ (bitvec a) (bitvec b) f = f a b := rfl
+
+@[simp]
+theorem pBind₂_if_then_poison_eq_ite_pBind₂ {n m k} {c : Prop} [Decidable c] {x : iN n} {y : iN m} {f : BitVec n → BitVec m → iN k} :
+    pBind₂ (if c then poison else x : no_index _) y f = if c then poison else pBind₂ x y f := by
+  split <;> rfl
+
+@[simp]
+theorem pBind₂_if_else_poison_eq_ite_pBind₂ {n m k} {c : Prop} [Decidable c] {x : iN n} {y : iN m} {f : BitVec n → BitVec m → iN k} :
+    pBind₂ (if c then x else poison : no_index _) y f = if c then pBind₂ x y f else poison := by
+  split <;> rfl
+
+@[simp]
+theorem pBind₂_if_then_poison_right_eq_ite_pBind₂ {n m k} {c : Prop} [Decidable c] {x : iN n} {y : iN m} {f : BitVec n → BitVec m → iN k} :
+    pBind₂ x (if c then poison else y : no_index _) f = if c then poison else pBind₂ x y f := by
+  split <;> simp
+
+@[simp]
+theorem pBind₂_if_else_poison_right_eq_ite_pBind₂ {n m k} {c : Prop} [Decidable c] {x : iN n} {y : iN m} {f : BitVec n → BitVec m → iN k} :
+    pBind₂ x (if c then y else poison : no_index _) f = if c then pBind₂ x y f else poison := by
+  split <;> simp
+
+@[simp]
+theorem pBind₂_cond_poison_left_eq_cond_pBind₂ {n m k} {c : Bool} {x : iN n} {y : iN m} {f : BitVec n → BitVec m → iN k} :
+    pBind₂ (cond c poison x) y f = cond c poison (pBind₂ x y f) := by
+  cases c <;> rfl
+
+@[simp]
+theorem pBind₂_cond_poison_right_eq_cond_pBind₂ {n m k} {c : Bool} {x : iN n} {y : iN m} {f : BitVec n → BitVec m → iN k} :
+    pBind₂ x (cond c poison y) f = cond c poison (pBind₂ x y f) := by
+  cases c <;> simp
+
+@[simp]
+theorem pBind₂_cond_poison_both_eq_cond_pBind₂ {n m k} {c : Bool} {x : iN n} {y : iN m} {f : BitVec n → BitVec m → iN k} :
+    pBind₂ (cond c poison x) (cond c poison y) f = cond c poison (pBind₂ x y f) := by
+  cases c <;> simp
+
+@[grind =]
+theorem pBind₂_comm {n m k} {x : iN n} {y : iN m} {f : BitVec n → BitVec m → iN k} :
+    pBind₂ x y f = pBind₂ y x (fun b a => f a b) := by
+  cases x <;> cases y <;> rfl
+
+@[simp, grind]
+theorem pBind_assoc {n m k} {x : iN n}
+    {f : BitVec n → iN m} {g : BitVec m → iN k} :
+    pBind (pBind x f) g = pBind x (fun a => pBind (f a) g) := by
+
+  cases x <;> rfl
+
+@[simp]
+theorem pBind_if_then_poison_eq_if_pBind {n m} {c : Prop} [Decidable c] {x : iN n} {f : BitVec n → iN m} :
+    pBind (if c then poison else x : no_index _) f = if c then poison else pBind x f := by
+  split <;> rfl
+
+@[simp]
+theorem pBind_if_else_poison_eq_if_pBind {n m} {c : Prop} [Decidable c] {x : iN n} {f : BitVec n → iN m} :
+    pBind (if c then x else poison : no_index _) f = if c then pBind x f else poison := by
+  split <;> rfl
+
+end iN
