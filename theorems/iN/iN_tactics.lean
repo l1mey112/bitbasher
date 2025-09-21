@@ -64,7 +64,10 @@ macro_rules
       revert_iN
       iN_convert_goal_bitvec
       -- there might be no more goals after this
-      all_goals blast_bv
+      all_goals solve
+        | grind
+        -- `blast_bv` wouldn't be able to solve ∀n bitwidth goals. give up here
+        | bv_normalize
     )
   )
   | `(tactic| blast $tac) => `(tactic|
@@ -72,8 +75,10 @@ macro_rules
       revert_iN
       iN_convert_goal_bitvec
       -- there might be no more goals after this
-      all_goals
-        cases $tac
-        blast_bv
+      all_goals solve
+        | grind
+        | cases $tac <;> grind
+        | cases $tac
+          blast_bv
     )
   )

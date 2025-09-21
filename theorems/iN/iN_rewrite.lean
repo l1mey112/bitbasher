@@ -12,7 +12,7 @@ inductive Rewrite {n} : iN n → iN n → Prop where
 /--
 `RewriteIff x y` means `x` can be rewritten into `y` and `y` can be rewritten into `x`.
 -/
-abbrev RewriteIff {n} (x y : iN n) := Rewrite x y ∧ Rewrite y x
+def RewriteIff {n} (x y : iN n) := Rewrite x y ∧ Rewrite y x
 
 @[inherit_doc] infix:50 " ~> "  => Rewrite
 @[inherit_doc] infix:50 " <~> " => RewriteIff
