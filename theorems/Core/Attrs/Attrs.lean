@@ -27,14 +27,13 @@ instance : ToString Opts where
   toString := Opts.toString
 
 structure Entry where
-  name : Name
-  filename : String
+  name : String
   line : Option Nat
   opts : Opts
   rule : Rule
-deriving Lean.ToJson
+deriving Lean.ToJson, Repr
 
-initialize rule_entries : SimplePersistentEnvExtension Entry (Array Entry) ←
+initialize ruleEntries : SimplePersistentEnvExtension Entry (Array Entry) ←
   registerSimplePersistentEnvExtension {
     name := `rule_entries
     addImportedFn := Array.flatMap id
@@ -115,7 +114,9 @@ initialize ruleAttr : Unit ←
     add   := fun declName stx _attrKind => do
       let ctx ← read
       let filename := ctx.fileName
+
       let line := stx.getPos?.map λ pos => ctx.fileMap.toPosition pos |>.line
+      let module ← getMainModule
 
       discard <| MetaM.run do
         let axioms ← collectAxioms declName
@@ -135,9 +136,14 @@ initialize ruleAttr : Unit ←
             if ost != "" then
               dbg_trace ost
 
+            /- val.name.getString! gives `add_comm` for `iN.add_comm` -/
+
+            let name := module.toString
+              ++ ":"
+              ++ val.name.getString!
+
             pure <| {
-              name := val.name,
-              filename := filename,
+              name := name,
               line := line,
               opts := opts,
               rule := rule
@@ -145,4 +151,7 @@ initialize ruleAttr : Unit ←
               : Entry
             }
           | _ => throwError "@[rule] is only allowed on theorems"
+
+        modifyEnv fun env =>
+         ruleEntries.addEntry env entry
   }

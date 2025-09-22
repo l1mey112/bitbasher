@@ -57,7 +57,10 @@ structure Rule where
   direction : RuleDirection
   lhs : RuleExpr
   rhs : RuleExpr
-deriving Lean.ToJson
+
+  /-- Pretty printed, if useful. -/
+  pp : String
+deriving Lean.ToJson, Repr
 
 /-- Why the fuck does Lean not have this. -/
 def foldlEl (arr : Array α) (init : β) (f : β → Nat → α → β) : β := Id.run do
@@ -103,7 +106,7 @@ partial def Rule.toString (rule : Rule) : String := Id.run do
     r ++ s!"  {bv_poly_str idx el}\n"
 
   str := str ++ foldlEl rule.inputs "" fun r idx el =>
-    r ++ s!"  %{idx} : {ty_str el}\n"
+    r ++ s!"  %{idx} : iN {ty_str el}\n"
 
   str := str ++ foldlEl rule.hypotheses "" fun r _ el =>
     r ++ s!"  {expr_str el} ~> 1\n"
@@ -302,8 +305,6 @@ def Rule.parseRule (type : Expr) (validInstructions : Std.HashMap Name String) :
             hypotheses := s.hypotheses.push hypot
           }
       else
-        dbg_trace s!"we have something type {fvar_type} {repr fvar_type}"
-
         /- Argument of type `iN n` -/
         let bitwidth ← M.parseiN fvar_type
 
@@ -330,11 +331,15 @@ def Rule.parseRule (type : Expr) (validInstructions : Std.HashMap Name String) :
     | _ => throwError "expected `~>` or `<~>` expression"
 
     let s := (← get)
-    return {
+    let rule := {
       inputs := s.input_variables
       bit_variables := s.bit_variables
       direction := dir,
       hypotheses := s.hypotheses
       lhs := lhs,
       rhs := rhs,
+
+      pp := "",
+      : Rule
     }
+    return { rule with pp := rule.toString }
