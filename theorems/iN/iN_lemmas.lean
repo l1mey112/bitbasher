@@ -1,7 +1,6 @@
 import theorems.iN.SimpSets
 import theorems.iN.iN_def
 import theorems.iN.iN_rewrite
-import theorems.Core.Attrs.Attrs
 
 /-- The supported bit sizes. Proofs do not need to prove ∀n : Nat. -/
 inductive Bits : Nat → Prop where

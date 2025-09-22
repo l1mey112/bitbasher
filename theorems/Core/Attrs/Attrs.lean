@@ -1,86 +1,148 @@
 import Lean
-import theorems.Core.Attrs.Match
+import theorems.Core.Attrs.Rule
 
-open Lean Parser Elab
+open Lean Parser Elab Meta
 
-inductive EntryVariant where
-  | rewrite : Match → EntryVariant
-deriving Lean.ToJson, Lean.FromJson, Inhabited
+structure Opts where
+  /-- Is a normalising rule. -/
+  is_ideal : Bool
+  /-- Match on constant arguments. Indices into `Rule.inputs`. -/
+  const_inputs : Array Nat
+deriving Lean.ToJson, Inhabited, Repr
+
+def Opts.toString (opts : Opts) : String := Id.run do
+  let mut s := ""
+
+  if opts.is_ideal then
+    s := s ++ "ideal"
+
+  if h : opts.const_inputs.size > 0 then
+    s := s ++ s!" const (%{opts.const_inputs[0]}"
+      ++ opts.const_inputs[1:].foldl (s!"{·}, %{·}") ""
+      ++ ")"
+
+  return s
+
+instance : ToString Opts where
+  toString := Opts.toString
 
 structure Entry where
   name : Name
   filename : String
   line : Option Nat
-  variant : EntryVariant
-deriving Lean.ToJson, Lean.FromJson, Inhabited
+  opts : Opts
+  rule : Rule
+deriving Lean.ToJson
 
-initialize entries : SimplePersistentEnvExtension Entry (Array Entry) ←
+initialize rule_entries : SimplePersistentEnvExtension Entry (Array Entry) ←
   registerSimplePersistentEnvExtension {
-    name := `entries
+    name := `rule_entries
     addImportedFn := Array.flatMap id
     addEntryFn    := Array.push
   }
 
-def parseMatch (type : Expr) : MetaM (Option Match) := do
-  /- forall {u : Nat} (a : BitVec u) (b : BitVec u) (con1 : BitVec u) (con2 : BitVec u), Eq.{1} (BitVec u) (...) (...) -/
+syntax (name := rule)
+  "rule"
+  ("ideal"
+    ("const" "(" withoutPosition(num+) ")")?
+  )? : attr
 
-  logInfo s!"{type}"
+def Array.hasDuplicates {α : Type} [Hashable α] [BEq α] (a : Array α) : Bool :=
+  let rec go (i : Nat) (seen : Std.HashSet α) : Bool :=
+    if h : i < a.size then
+      let x := a[i]'h
+      if seen.contains x then true else go (i+1) (seen.insert x)
+    else
+      false
+  go 0 {}
 
-  Meta.forallTelescope type fun fvars rhs => do
-    logInfo s!"fvars: {fvars}"
-    logInfo s!"rhs: {rhs}"
+def parseRuleAttr (stx : Syntax) (rule : Rule) : MetaM Opts := do
+  match stx with
+  | `(rule|rule) => return default
+  | `(rule|rule ideal) => return { (default : Opts) with is_ideal := true }
+  | `(rule|rule ideal const ($[$xs:num]*)) =>
+    let nats := xs.map (·.getNat)
 
-    --logInfo s!"t: {fvars[0]!} {fvars[0]!.fvarId!.name}"
+    if nats.hasDuplicates then
+      throwError "Duplicate const reference"
 
-    let fvar_types ← fvars.mapM Meta.inferType
-    logInfo s!"types are {fvar_types}"
+    if nats.any (· >= rule.inputs.size) then
+      throwError "Number out of range"
 
-    -- types are #[Nat, BitVec _uniq.199, BitVec _uniq.199, BitVec _uniq.199, BitVec _uniq.199]
+    return { (default : Opts) with
+      is_ideal := true,
+      const_inputs := nats,
+    }
+  | _ => throwErrorAt stx "Invalid syntax"
 
+syntax (name := inst) "inst" str : attr
 
+initialize valid_instructions_env : SimplePersistentEnvExtension (Name × String) (Std.HashMap Name String) ←
+  let addEntryFn | m, (n3, n4) => m.insert n3 n4
+  registerSimplePersistentEnvExtension {
+    name := `valid_instructions
+    addImportedFn := mkStateFromImportedEntries addEntryFn {}
+    addEntryFn
+  }
 
-    /- match fvars with
-    | #[g, magma, lhsv] => parse rhs g magma lhsv false
-    | #[g, magma, finite, lhsv] =>
-      let (.app (.const `Finite _) _) := ← Meta.inferType finite | return none
-      parse rhs g magma lhsv true
-    | _ => return none -/
-
-  return Match.mk
-
-initialize rewriteAttr : Unit ←
+initialize instAttr : Unit ←
   registerBuiltinAttribute {
-    name  := `rewrite
-    descr := "tags theorems to be used as rewrite rules"
+    name  := `inst
+    descr := "tags theorems to be used as instructions"
+    applicationTime := .afterCompilation
+    add   := fun declName stx _attrKind => do
+      let strstx := stx[1]!
+      let some str := strstx.isStrLit? | throwErrorAt strstx "expected string literal"
+
+      let info ← getConstInfo declName
+      match info with
+      | .defnInfo _ => pure ()
+      | _ => throwErrorAt stx "@[inst] is only allowed on definitions"
+
+      let s := valid_instructions_env.getState (← getEnv)
+      if s.valuesArray.any (· == str) then
+        throwErrorAt strstx "instruction with name {str} already defined"
+
+      modifyEnv fun env =>
+         valid_instructions_env.addEntry env (declName, str)
+  }
+
+initialize ruleAttr : Unit ←
+  registerBuiltinAttribute {
+    name  := `rule
+    descr := "tags theorems to be used as equalities and rewrite rules if `ideal` is present"
     applicationTime := .afterCompilation
     add   := fun declName stx _attrKind => do
       let ctx ← read
       let filename := ctx.fileName
       let line := stx.getPos?.map λ pos => ctx.fileMap.toPosition pos |>.line
 
-      logInfo s!"File: {filename}, Line: {line}"
-
-      discard <| Lean.Meta.MetaM.run do
-        let info ← getConstInfo declName
-        let entry: Entry ← match info with
-            | .thmInfo  (val : TheoremVal) =>
-              if let some thing ← parseMatch val.type then
-                pure <| ⟨val.name, filename, line, .rewrite thing⟩
-              else
-                throwError "failed to match type of @[rewrite] theorem"
-            | _ => throwError "@[rewrite] is only allowed on theorems"
-
-        let axioms ← Lean.collectAxioms declName
+      discard <| MetaM.run do
+        let axioms ← collectAxioms declName
         for a in axioms do
           if not (a ∈ [``propext, ``Classical.choice, ``Quot.sound]) then
-            throwError s!"declaration uses a prohibited axiom: {a}"
+            throwError s!"rule uses a prohibited axiom: {a}"
 
-        logInfo s!"Entry: {entry.name}"
+        let info ← getConstInfo declName
+        let entry: Entry ← match info with
+          | .thmInfo  (val : TheoremVal) =>
+            let valid_instructions := valid_instructions_env.getState (← getEnv)
+            let rule ← Rule.parseRule val.type valid_instructions
+            let opts ← parseRuleAttr stx rule
 
-        modifyEnv fun env =>
-         entries.addEntry env entry
+            dbg_trace rule
+            let ost := opts.toString
+            if ost != "" then
+              dbg_trace ost
+
+            pure <| {
+              name := val.name,
+              filename := filename,
+              line := line,
+              opts := opts,
+              rule := rule
+
+              : Entry
+            }
+          | _ => throwError "@[rule] is only allowed on theorems"
   }
-
-def extractRewrites {m : Type → Type} [Monad m] [MonadEnv m] [MonadError m] :
-    m (Array Entry) := do
-  return entries.getState (← getEnv)

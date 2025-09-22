@@ -1,12 +1,13 @@
 import theorems.iN.SimpSets
 import theorems.iN.iN_def
+import theorems.Core.Attrs.Attrs
 
 namespace iN
 
 @[simp_iN]
 def add? {n} (a b : BitVec n) : iN n := bitvec (a + b)
 
-@[simp_iN]
+@[simp_iN, inst "add"]
 def add {n} (x y : iN n) : iN n := pBind₂ x y add?
 
 @[simp_iN]
@@ -16,7 +17,7 @@ def addNsw? {n} (a b : BitVec n) : iN n :=
   else
     add? a b
 
-@[simp_iN]
+@[simp_iN, inst "add.nsw"]
 def addNsw {n} (x y : iN n) : iN n := pBind₂ x y addNsw?
 
 @[simp_iN]
@@ -26,7 +27,7 @@ def addNuw? {n} (a b : BitVec n) : iN n :=
   else
     add? a b
 
-@[simp_iN]
+@[simp_iN, inst "add.nuw"]
 def addNuw {n} (x y : iN n) : iN n := pBind₂ x y addNuw?
 
 @[simp_iN]
@@ -38,7 +39,7 @@ def addNw? {n} (a b : BitVec n) : iN n :=
   else
     add? a b
 
-@[simp_iN]
+@[simp_iN, inst "add.nw"]
 def addNw {n} (x y : iN n) : iN n := pBind₂ x y addNw?
 
 instance : Add (iN n) where
@@ -51,7 +52,7 @@ infixl:65 " +nw "  => iN.addNw
 @[simp_iN]
 def sub? {n} (a b : BitVec n) : iN n := bitvec (a - b)
 
-@[simp_iN]
+@[simp_iN, inst "sub"]
 def sub {n} (x y : iN n) : iN n := pBind₂ x y sub?
 
 @[simp_iN]
@@ -61,7 +62,7 @@ def subNsw? {n} (a b : BitVec n) : iN n :=
   else
     sub? a b
 
-@[simp_iN]
+@[simp_iN, inst "sub.nsw"]
 def subNsw {n} (x y : iN n) : iN n := pBind₂ x y subNsw?
 
 @[simp_iN]
@@ -71,7 +72,7 @@ def subNuw? {n} (a b : BitVec n) : iN n :=
   else
     sub? a b
 
-@[simp_iN]
+@[simp_iN, inst "sub.nuw"]
 def subNuw {n} (x y : iN n) : iN n := pBind₂ x y subNuw?
 
 @[simp_iN]
@@ -83,7 +84,7 @@ def subNw? {n} (a b : BitVec n) : iN n :=
   else
     sub? a b
 
-@[simp_iN]
+@[simp_iN, inst "sub.nw"]
 def subNw {n} (x y : iN n) : iN n := pBind₂ x y subNw?
 
 instance : Sub (iN n) where
@@ -96,61 +97,61 @@ infixl:65 " -nw "  => iN.subNw
 @[simp_iN]
 def icmpEq? {n} (x y : BitVec n) : iN 1 := bitvec (if x == y then 1 else 0)
 
-@[simp_iN]
+@[simp_iN, inst "icmp.eq"]
 def icmpEq {n} (x y : iN n) : iN 1 := pBind₂ x y icmpEq?
 
 @[simp_iN]
 def icmpNe? {n} (x y : BitVec n) : iN 1 := bitvec (if x != y then 1 else 0)
 
-@[simp_iN]
+@[simp_iN, inst "icmp.ne"]
 def icmpNe {n} (x y : iN n) : iN 1 := pBind₂ x y icmpNe?
 
 @[simp_iN]
 def icmpUgt? {n} (x y : BitVec n) : iN 1 := bitvec (if x > y then 1 else 0)
 
-@[simp_iN]
+@[simp_iN, inst "icmp.ugt"]
 def icmpUgt {n} (x y : iN n) : iN 1 := pBind₂ x y icmpUgt?
 
 @[simp_iN]
 def icmpUge? {n} (x y : BitVec n) : iN 1 := bitvec (if x >= y then 1 else 0)
 
-@[simp_iN]
+@[simp_iN, inst "icmp.uge"]
 def icmpUge {n} (x y : iN n) : iN 1 := pBind₂ x y icmpUge?
 
 @[simp_iN]
 def icmpUlt? {n} (x y : BitVec n) : iN 1 := bitvec (if x < y then 1 else 0)
 
-@[simp_iN]
+@[simp_iN, inst "icmp.ult"]
 def icmpUlt {n} (x y : iN n) : iN 1 := pBind₂ x y icmpUlt?
 
 @[simp_iN]
 def icmpUle? {n} (x y : BitVec n) : iN 1 := bitvec (if x <= y then 1 else 0)
 
-@[simp_iN]
+@[simp_iN, inst "icmp.ule"]
 def icmpUle {n} (x y : iN n) : iN 1 := pBind₂ x y icmpUle?
 
 @[simp_iN]
 def icmpSgt? {n} (x y : BitVec n) : iN 1 := bitvec (if x.sle y then 0 else 1) -- inverse
 
-@[simp_iN]
+@[simp_iN, inst "icmp.sgt"]
 def icmpSgt {n} (x y : iN n) : iN 1 := pBind₂ x y icmpSgt?
 
 @[simp_iN]
 def icmpSge? {n} (x y : BitVec n) : iN 1 := bitvec (if x.slt y then 0 else 1) -- inverse
 
-@[simp_iN]
+@[simp_iN, inst "icmp.sge"]
 def icmpSge {n} (x y : iN n) : iN 1 := pBind₂ x y icmpSge?
 
 @[simp_iN]
 def icmpSlt? {n} (x y : BitVec n) : iN 1 := bitvec (if x.slt y then 1 else 0)
 
-@[simp_iN]
+@[simp_iN, inst "icmp.slt"]
 def icmpSlt {n} (x y : iN n) : iN 1 := pBind₂ x y icmpSlt?
 
 @[simp_iN]
 def icmpSle? {n} (x y : BitVec n) : iN 1 := bitvec (if x.sle y then 1 else 0)
 
-@[simp_iN]
+@[simp_iN, inst "icmp.sle"]
 def icmpSle {n} (x y : iN n) : iN 1 := pBind₂ x y icmpSle?
 
 infixl:55 " ==ᵤ " => iN.icmpEq
@@ -164,16 +165,16 @@ infixl:55 " ≤ₛ "  => iN.icmpSle
 infixl:55 " >ₛ "  => iN.icmpSgt
 infixl:55 " ≥ₛ "  => iN.icmpSge
 
-@[simp_iN]
+@[simp_iN, inst "and"]
 def and {n} (x y : iN n) : iN n := pBind₂ x y (fun a b => bitvec (a &&& b))
 
-@[simp_iN]
+@[simp_iN, inst "or"]
 def or {n} (x y : iN n) : iN n := pBind₂ x y (fun a b => bitvec (a ||| b))
 
-@[simp_iN]
+@[simp_iN, inst "not"]
 def not {n} (x : iN n) : iN n := pBind x (fun a => bitvec (~~~a))
 
-@[simp_iN]
+@[simp_iN, inst "xor"]
 def xor {n} (x y : iN n) : iN n := pBind₂ x y (fun a b => bitvec (a ^^^ b))
 
 instance : HAnd (iN n) (iN n) (iN n) where
@@ -197,7 +198,7 @@ def shl? {n} (a b : BitVec n) : iN n :=
   else
     bitvec (a <<< b)
 
-@[simp_iN]
+@[simp_iN, inst "shl"]
 def shl {n} (x y : iN n) : iN n := pBind₂ x y shl?
 
 @[simp_iN]
@@ -209,7 +210,7 @@ def shlNsw? {n} (a b : BitVec n) : iN n :=
   else
     shl? a b
 
-@[simp_iN]
+@[simp_iN, inst "shl.nsw"]
 def shlNsw {n} (x y : iN n) : iN n := pBind₂ x y shlNsw?
 
 @[simp_iN]
@@ -221,7 +222,7 @@ def shlNuw? {n} (a b : BitVec n) : iN n :=
   else
     shl? a b
 
-@[simp_iN]
+@[simp_iN, inst "shl.nuw"]
 def shlNuw {n} (x y : iN n) : iN n := pBind₂ x y shlNuw?
 
 instance : HShiftLeft (iN n) (iN n) (iN n) where
@@ -239,7 +240,7 @@ def lshr? {n} (a b : BitVec n) : iN n :=
   else
     bitvec (a >>> b)
 
-@[simp_iN]
+@[simp_iN, inst "lshr"]
 def lshr {n} (x y : iN n) : iN n := pBind₂ x y lshr?
 
 @[simp_iN]
@@ -253,7 +254,7 @@ def lshrExact? {n} (a b : BitVec n) : iN n :=
   else
     lshr? a b
 
-@[simp_iN]
+@[simp_iN, inst "lshr.exact"]
 def lshrExact {n} (x y : iN n) : iN n := pBind₂ x y lshrExact?
 
 infixl:75 " >>>ᵤ " => iN.lshr
@@ -268,7 +269,7 @@ def ashr? {n} (a b : BitVec n) : iN n :=
   else
     bitvec (a.sshiftRight' b)
 
-@[simp_iN]
+@[simp_iN, inst "ashr"]
 def ashr {n} (x y : iN n) : iN n := pBind₂ x y ashr?
 
 @[simp_iN]
@@ -282,7 +283,7 @@ def ashrExact? {n} (a b : BitVec n) : iN n :=
   else
     ashr? a b
 
-@[simp_iN]
+@[simp_iN, inst "ashr.exact"]
 def ashrExact {n} (x y : iN n) : iN n := pBind₂ x y ashrExact?
 
 infixl:75 " >>>ₛ " => iN.ashr
