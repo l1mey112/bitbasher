@@ -120,7 +120,7 @@ initialize ruleAttr : Unit ←
       discard <| MetaM.run do
         let axioms ← collectAxioms declName
         for a in axioms do
-          if not (a ∈ [``propext, ``Classical.choice, ``Quot.sound]) then
+          if not (a ∈ [``propext, ``Classical.choice, ``Quot.sound, ``Lean.ofReduceBool]) then
             throwError s!"rule uses a prohibited axiom: {a}"
 
         let info ← getConstInfo declName

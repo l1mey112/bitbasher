@@ -2,20 +2,13 @@ import theorems.iN.SimpSets
 import theorems.iN.iN_def
 import theorems.iN.iN_rewrite
 
-/-- The supported bit sizes. Proofs do not need to prove ∀n : Nat. -/
-inductive Bits : Nat → Prop where
-  | i8 : Bits 8
-  | i16 : Bits 16
-  | i32 : Bits 32
-  | i64 : Bits 64
-
-/-- The supported bit sizes, with bool. Proofs do not need to prove ∀n : Nat. -/
-inductive BitsBool : Nat → Prop where
-  | i1 : BitsBool 1
-  | i8 : BitsBool 8
-  | i16 : BitsBool 16
-  | i32 : BitsBool 32
-  | i64 : BitsBool 64
+/-- Average case supported bit sizes. Proofs do not need to prove ∀n : Nat. -/
+inductive Bits64 : Nat → Prop where
+  | i1 : Bits64 1
+  | i8 : Bits64 8
+  | i16 : Bits64 16
+  | i32 : Bits64 32
+  | i64 : Bits64 64
 
 @[grind =]
 theorem BitVec.saddOverflow_comm {n} (a b : BitVec n)
@@ -33,7 +26,7 @@ theorem BitVec.uaddOverflow_comm {n} (a b : BitVec n)
   unfold BitVec.uaddOverflow
   grind
 
-theorem BitVec.saddOverflow_chain_assoc_monotone {n} {hn : BitsBool n} (a b c : BitVec n)
+theorem BitVec.saddOverflow_chain_assoc_monotone {n} {hn : Bits64 n} (a b c : BitVec n)
     (h : a.msb = b.msb ∧ b.msb = c.msb)
 
     : (a.saddOverflow b || (a + b).saddOverflow c) =
@@ -53,7 +46,7 @@ theorem BitVec.saddOverflow_chain_assoc_monotone {n} {hn : BitsBool n} (a b c : 
 
   exists 8, 127#8, 1#8, -1#8 -/
 
-theorem BitVec.uaddOverflow_chain_assoc {n} {hn : BitsBool n} (a b c : BitVec n)
+theorem BitVec.uaddOverflow_chain_assoc {n} {hn : Bits64 n} (a b c : BitVec n)
     : (a.uaddOverflow b || (a + b).uaddOverflow c) =
       (b.uaddOverflow c || a.uaddOverflow (b + c)) := by
 

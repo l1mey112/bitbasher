@@ -1,5 +1,6 @@
 import Lean
 import theorems.iN.iN_rewrite
+import theorems.iN.iN_lemmas
 
 open Lean Meta
 
@@ -13,6 +14,7 @@ deriving Lean.ToJson, Repr
 /-- For polymorphic bitwidth arguments.  -/
 inductive BitwidthPoly : Type where
   | any
+  /-- Assumes there is at most one bitwidth. -/
   | or (options : Array Nat)
 deriving Lean.ToJson, Repr
 
@@ -50,7 +52,7 @@ structure Rule where
   /-- Each input has a reference to a bitwidth variable or is constant. -/
   inputs : Array Bitwidth
   /-- List of hypotheses/preconditions of the form `(expr : iN 1) ~> 1`.  -/
-  hypot : Array RuleExpr
+  hypotheses : Array RuleExpr
 
   direction : RuleDirection
   lhs : RuleExpr
@@ -73,7 +75,7 @@ partial def Rule.toString (rule : Rule) : String := Id.run do
   let bv_poly_str : Nat → BitwidthPoly → String
     | bv_idx, BitwidthPoly.any => s!"∀bv{bv_idx} : Nat"
     | bv_idx, BitwidthPoly.or options =>
-      let pieces := options.foldl (s!"{·}, {·}") ""
+      let pieces := s!"{options[0]!}" ++ options[1:].foldl (s!"{·}, {·}") ""
       s!"∀bv.{bv_idx} ∈ {"{"}{pieces}{"}"}"
 
   let rec expr_str (re : RuleExpr) : String :=
@@ -103,6 +105,9 @@ partial def Rule.toString (rule : Rule) : String := Id.run do
   str := str ++ foldlEl rule.inputs "" fun r idx el =>
     r ++ s!"  %{idx} : {ty_str el}\n"
 
+  str := str ++ foldlEl rule.hypotheses "" fun r _ el =>
+    r ++ s!"  {expr_str el} ~> 1\n"
+
   let body_str :=
     (expr_str rule.lhs) ++ (direction_str rule.direction) ++ (expr_str rule.rhs)
 
@@ -126,6 +131,9 @@ structure ParseState where
   input_variables : Array Bitwidth
   /-- Index into `input_variables`.  -/
   input_variable_fvars : Std.HashMap FVarId Nat
+
+  /-- Array of hypotheses of the form (expr : iN 1) ~> 1 -/
+  hypotheses : Array RuleExpr
 deriving Inhabited, Repr
 
 abbrev M := StateRefT ParseState MetaM
@@ -134,6 +142,19 @@ namespace M
 
 def run (config : ParseConfig) (m : M α) : MetaM α :=
   m.run' { (default : ParseState) with config }
+
+def parseiNBitvecLit (nfExpr : Expr) : M (Option Nat) := do
+  match_expr nfExpr with
+  | poison _ =>
+    return none
+
+  | bitvec _ bv => match_expr bv with
+    | BitVec.ofNat _ lit =>
+      let nv := (← getNatValue? lit).get!
+      return nv
+    | _ => throwError m!"Invalid expression for bitvec literal"
+
+  | _ => return none
 
 def parseiN (expr : Expr) : M Bitwidth := do
   -- Lean.Expr.app (Lean.Expr.const `iN []) (Lean.Expr.lit (Lean.Literal.natVal 32))
@@ -150,10 +171,7 @@ def parseiN (expr : Expr) : M Bitwidth := do
       | some idx => return Bitwidth.bitvar idx
       | none     => throwError "iN with non-polymorphic bitwidth"
 
-  throwError "expected iN type, got {expr} {repr expr}"
-
-def parseHypot (expr : Expr) : M Unit := do
-  throwError "unimplemented"
+  throwError "expected iN type, got {expr}"
 
 end M
 
@@ -187,14 +205,8 @@ where
     match_expr nfExpr with
     | poison _ =>
       return RuleExprKind.poison
-
-    | bitvec _ bv => match_expr bv with
-      | BitVec.ofNat _ lit =>
-        let nv := (← getNatValue? lit).get!
-        return RuleExprKind.const nv
-      | _ => throwError m!"Invalid expression for bitvec literal"
-
-    | _ => return none
+    | _ =>
+      return (← M.parseiNBitvecLit nfExpr).map RuleExprKind.const
 
   checkVar (nfExpr : Expr) : M (Option RuleExprKind) := do
     if let some fvar := nfExpr.fvarId? then
@@ -224,6 +236,26 @@ where
       kind := exprKind.get!,
     }
 
+namespace M
+
+def parseHypot (nfExpr : Expr) : M RuleExpr := do
+  match_expr nfExpr with
+  | Rewrite _ lhs rhs =>
+
+    let lhs_type ← inferType lhs
+    let bw ← M.parseiN lhs_type
+    match bw with
+    | Bitwidth.exact 1 => pure
+    | _ => throwError s!"Expected proposition of the form (expr : iN 1) ~> 1, got incorrect type {lhs_type}"
+
+    let some 1 ← M.parseiNBitvecLit rhs | throwError s!"Expected proposition of the form (expr : iN 1) ~> 1, got ... ~> {rhs}"
+    return ← RuleExpr.of lhs
+  | _ => pure
+
+  throwError s!"Expected proposition of the form (expr : iN 1) ~> 1, got {nfExpr}"
+
+end M
+
 def Rule.parseRule (type : Expr) (validInstructions : Std.HashMap Name String) : MetaM Rule := do
   /- forall {u : Nat} (a : BitVec u) (b : BitVec u) (con1 : BitVec u) (con2 : BitVec u), Eq.{1} (BitVec u) (...) (...) -/
 
@@ -241,19 +273,37 @@ def Rule.parseRule (type : Expr) (validInstructions : Std.HashMap Name String) :
     -/
     fvars.forM fun fvar => do
       let fvar_type ← inferType fvar
+      let fvar_type_type ← inferType fvar_type
       let fvar_id := fvar.fvarId!
 
-      if fvar_type.isConstOf `Nat then
+      if fvar_type.isConstOf ``Nat then
         /- Polymorphic bitwidth -/
         modify fun s =>
           { s with
             bit_variables := s.bit_variables.push BitwidthPoly.any
             bit_variable_fvars := s.bit_variable_fvars.insert fvar_id (s.bit_variables.size)
           }
-      else if fvar_type.isProp then
+      else if fvar_type.isAppOf ``Bits64 then
+        let fvar_possible ← whnf fvar_type.getAppArgs[0]!
+        let some fvar := fvar_possible.fvarId? | throwError "Bits64 doesn't have an bitvar argument"
+        let some bitv := (← getThe ParseState).bit_variable_fvars.get? fvar | throwError "Bits64 doesn't have an bitvar argument"
+
+        modify fun s =>
+          { s with
+            bit_variables := s.bit_variables.set! bitv $ BitwidthPoly.or #[1, 8, 16, 32, 64]
+          }
+      else if fvar_type_type.isProp then
         /- Hypothesis of the form `(expr : iN 1) ~> 1` -/
-        M.parseHypot fvar
+        let reducedExpr ← unfoldProjs fvar_type
+        let hypot ← M.parseHypot reducedExpr
+
+        modify fun s =>
+          { s with
+            hypotheses := s.hypotheses.push hypot
+          }
       else
+        dbg_trace s!"we have something type {fvar_type} {repr fvar_type}"
+
         /- Argument of type `iN n` -/
         let bitwidth ← M.parseiN fvar_type
 
@@ -284,7 +334,7 @@ def Rule.parseRule (type : Expr) (validInstructions : Std.HashMap Name String) :
       inputs := s.input_variables
       bit_variables := s.bit_variables
       direction := dir,
-      hypot := #[]
+      hypotheses := s.hypotheses
       lhs := lhs,
       rhs := rhs,
     }

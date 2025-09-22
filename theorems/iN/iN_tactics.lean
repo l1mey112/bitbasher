@@ -26,20 +26,27 @@ elab "revert_iN" : tactic => do
 
 -- Tactic inspired by Lean MLIR in `SSA/Projects/InstCombine/Tactic/SimpLLVM.lean`
 
-syntax "iN_convert_goal_bitvec" : tactic
+syntax "iN_convert_goal_bitvec'" : tactic
 macro_rules
-  | `(tactic| iN_convert_goal_bitvec) => `(tactic|
+  | `(tactic| iN_convert_goal_bitvec') => `(tactic|
     first
     | fail_if_success (intro (v : iN (_)))
     | intro (v : iN (_))
+
       cases v
       case poison =>
         simp [simp_iN]
 
-      simp [simp_iN]
-      iN_convert_goal_bitvec
+      iN_convert_goal_bitvec'
       (try revert x)
     )
+
+syntax "iN_convert_goal_bitvec" : tactic
+macro_rules
+  | `(tactic| iN_convert_goal_bitvec) => `(tactic|
+    revert_iN;
+    iN_convert_goal_bitvec'
+  )
 
 syntax "blast_bv" : tactic
 macro_rules
@@ -61,8 +68,8 @@ syntax "blast" Lean.Parser.Tactic.elimTarget : tactic
 macro_rules
   | `(tactic| blast) => `(tactic|
     (
-      revert_iN
       iN_convert_goal_bitvec
+      simp [simp_iN]
       -- there might be no more goals after this
       all_goals solve
         | grind
@@ -72,8 +79,8 @@ macro_rules
   )
   | `(tactic| blast $tac) => `(tactic|
     (
-      revert_iN
       iN_convert_goal_bitvec
+      simp [simp_iN]
       -- there might be no more goals after this
       all_goals solve
         | grind
@@ -82,3 +89,16 @@ macro_rules
           blast_bv
     )
   )
+
+/-- `poison_unroll x y z => a b c`
+
+Performs `cases x; cases y; cases z`, solves every `poison` branch with
+`simp [iN_unwrap_inst]`, and in the unique `bitvec` branch introduces the
+payloads named `a b c`. -/
+syntax "poison_unroll" (ppSpace colGt ident)* " =>" (ppSpace colGt ident)* : tactic
+macro_rules
+| `(tactic| poison_unroll $xs:ident* => $ys:ident*) =>
+  `(tactic|
+    ($[cases $xs:ident with
+      | bitvec $ys:ident => ?_
+      | poison => simp [simp_iN]];*))

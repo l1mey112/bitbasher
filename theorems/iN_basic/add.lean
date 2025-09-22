@@ -26,14 +26,14 @@ theorem addNw_refine (x y : iN n)
 theorem add_assoc (x y z : iN n)
     : (x + y) + z <~> x + (y + z) := by blast
 
-theorem addNsw_assoc_same_sign {hn : Bits n} (x y z : iN n)
+theorem addNsw_assoc_same_sign {hn : Bits64 n} (x y z : iN n)
     (h :
       (x ≥ₛ 0) &&& (y ≥ₛ 0) &&& (z ≥ₛ 0) ~> 1 ∨
       (x <ₛ 0) &&& (y <ₛ 0) &&& (z <ₛ 0) ~> 1)
 
     : (x +nsw y) +nsw z <~> x +nsw (y +nsw z) := by blast hn
 
-theorem addNuw_assoc {n} {hn : Bits n} (x y z : iN n)
+theorem addNuw_assoc {n} {hn : Bits64 n} (x y z : iN n)
     : (x +nuw y) +nuw z <~> x +nuw (y +nuw z) := by blast hn
 
 end iN

@@ -19,4 +19,14 @@ theorem refine1
 theorem refine32
     : (poison : iN 32) ~> 2 := Rewrite.poison_forge 2
 
+theorem hypot0 {hn : Bits64 n}
+    : (poison : iN n) ~> 2 := Rewrite.poison_forge 2
+
+@[rule]
+theorem better2 {hn : Bits64 n} (x : iN n)
+    (h : x ≥ₛ 0 ~> 1)
+    : x ~> x := by
+
+  blast
+
 end iN
