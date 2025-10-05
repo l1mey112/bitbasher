@@ -1,4 +1,4 @@
-import theorems.iN.iN
+import theorems.iN
 
 namespace iN
 
@@ -43,8 +43,16 @@ theorem addNsw_assoc_same_sign {hn : Bits64 n} (x y z : iN n)
 
     : (x +nsw y) +nsw z <~> x +nsw (y +nsw z) := by blast hn -/
 
-@[rule]
+/- @[rule]
 theorem addNuw_assoc {n} {hn : Bits64 n} (x y z : iN n)
-    : (x +nuw y) +nuw z <~> x +nuw (y +nuw z) := by blast hn
+    : (x +nuw y) +nuw z <~> x +nuw (y +nuw z) := by blast hn -/
+
+theorem addNuw_assoc {n} {hn : Bits64 n} (x y z : iN n)
+    : (x +nuw y) +nuw z <~> x +nuw (y +nuw z) := by
+
+  iN_convert_goal_bitvec
+  simp [simp_iN]
+  cases hn
+  all_goals bv_decide +acNf
 
 end iN

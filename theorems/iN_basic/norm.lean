@@ -1,4 +1,4 @@
-import theorems.iN.iN
+import theorems.iN
 import theorems.Core.Attrs.Attrs
 
 namespace iN

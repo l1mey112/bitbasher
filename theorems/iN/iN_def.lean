@@ -18,6 +18,9 @@ instance : Coe Bool (iN 1) where
 instance : Coe (BitVec n) (iN n) where
   coe b := iN.bitvec b
 
+instance : Inhabited (iN n) where
+  default := poison
+
 namespace iN
 
 @[simp]

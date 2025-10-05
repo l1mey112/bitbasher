@@ -1,4 +1,4 @@
-import theorems.iN.iN
+import theorems.iN
 
 @[simp_iN]
 def popcount {n} (a : BitVec n) : BitVec n :=

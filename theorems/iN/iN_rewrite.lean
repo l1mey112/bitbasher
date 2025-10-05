@@ -19,6 +19,8 @@ def RewriteIff {n} (x y : iN n) := Rewrite x y ∧ Rewrite y x
 
 namespace Rewrite
 
+attribute [refl] Rewrite.refl
+
 /-- Poison can be rewritten to anything. -/
 @[simp]
 theorem poison_rewrite {n} (x : iN n)
@@ -50,36 +52,42 @@ theorem rewrite_poison_iff {n} {x : iN n}
   case mpr =>
     intro h
     rw [h]
-    exact Rewrite.refl poison
 
-@[refl, simp]
+@[refl]
 theorem rewrite_refl {n} (x : iN n)
     : x <~> x := by
 
-  constructor <;> exact Rewrite.refl x
-
-@[refl, simp]
-theorem rewrite_refl2 {n} {x : iN n}
-    : Rewrite x x ∧ Rewrite x x := by
-
-  -- this handles cases after the `abbrev` is unwrapped
   constructor <;> exact Rewrite.refl x
 
 instance {n} : @Std.Refl (iN n) Rewrite where
   refl := Rewrite.refl
 
 instance {n} : @Std.Refl (iN n) RewriteIff where
-  refl x := Rewrite.rewrite_refl x
+  refl := Rewrite.rewrite_refl
 
 @[grind →]
-theorem rewrite_trans {n} {x y z : iN n}
-    {hx : x ~> y} {hy : y ~> z} : x ~> z := by
+theorem trans {n} {x y z : iN n}
+    (hx : x ~> y) (hy : y ~> z) : x ~> z := by
 
   cases hx
   case refl =>
     exact hy
   case poison_forge v =>
     exact poison_rewrite z
+
+/--
+Rewrite congruence. Even though no instruction should be able to "observe" poison, `wf` must still be an assumption.
+-/
+theorem congrApp {n} (f : iN n → iN n)
+    (wf : f poison = poison)
+    {a a' : iN n} (h : a ~> a') : f a ~> f a' := by
+
+  cases h
+  case refl =>
+    exact Rewrite.refl (f a)
+  case poison_forge v =>
+    rw [wf]
+    exact poison_rewrite (f (bitvec v))
 
 @[grind]
 theorem eq_rewrite {n} {x y : iN n}
@@ -116,7 +124,6 @@ theorem rewrite_bitvec_bitvec {n} (a b : BitVec n)
   case mpr =>
     intro h
     rw [h]
-    exact Rewrite.refl (bitvec b)
 
 @[simp, grind]
 theorem rewrite_bitvec_iN {n} (a : BitVec n) (y : iN n)
@@ -130,7 +137,6 @@ theorem rewrite_bitvec_iN {n} (a : BitVec n) (y : iN n)
   case mpr =>
     intro h
     rw [h]
-    exact Rewrite.refl (bitvec a)
 
 @[simp]
 theorem if_then_poison_rewrite_iff {n} (c : Prop) [Decidable c] (x y : iN n)
