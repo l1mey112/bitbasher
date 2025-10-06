@@ -119,11 +119,11 @@ partial def Rule.toString (rule : Rule) : String := Id.run do
 instance : ToString Rule where
   toString := Rule.toString
 
-structure ParseConfig where
+private structure ParseConfig where
   validInstructions : Std.HashMap Name String
 deriving Inhabited, Repr
 
-structure ParseState where
+private structure ParseState where
   -- I don't really know how to use `ReaderT` + `StateRefT`
   config : ParseConfig
 
@@ -139,7 +139,7 @@ structure ParseState where
   hypotheses : Array RuleExpr
 deriving Inhabited, Repr
 
-abbrev M := StateRefT ParseState MetaM
+private abbrev M := StateRefT ParseState MetaM
 
 namespace M
 

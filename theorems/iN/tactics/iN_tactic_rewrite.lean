@@ -2,20 +2,22 @@ import Lean
 import theorems.iN.iN_def
 import theorems.iN.iN_rewrite
 
+import theorems.iN.tactics.shared
+
 open Lean Elab Tactic Meta
 
 /-- On a goal of `lhs ~> rhs`, apply a rewrite of the form `x ~> y`.  -/
-elab "apply_rewrite" t:term : tactic => withMainContext do
+elab "opt_rewrite" t:term : tactic => withMainContext do
   let mvarId ← getMainGoal
+  mvarId.checkNotAssigned `opt_rewrite
 
   let matchRewrite (e : Expr) : MetaM (Expr × Expr × Expr) := do
     match_expr e with
     | Rewrite n lhs rhs => return (n, lhs, rhs)
-    | _ => throwTacticEx `apply_rewrite mvarId m!"not a rewrite{indentExpr e}"
+    | _ => throwTacticEx `opt_rewrite mvarId m!"not a rewrite{indentExpr e}"
 
   let heq ← elabTerm t none true
 
-  --let heqIn := heq
   let heqType ← instantiateMVars (← inferType heq)
   let (newMVars, _, heqType) ← forallMetaTelescopeReducing heqType
   /- `∀ (x y : iN 32), expr` into `expr`. -/
@@ -32,7 +34,7 @@ elab "apply_rewrite" t:term : tactic => withMainContext do
   -- ⊢ lhs ~> rhs
   let lhsAbst ← kabstract lhs x occs
   unless lhsAbst.hasLooseBVars do
-    throwTacticEx `apply_rewrite mvarId m!"did not find instance of the pattern in the target expression{indentExpr lhs}"
+    throwTacticEx `opt_rewrite mvarId m!"did not find instance of the pattern in the target expression{indentExpr lhs}"
 
   let α := (Expr.app (.const `iN []) n)
   let motive := Lean.mkLambda `_a BinderInfo.default α lhsAbst
@@ -40,30 +42,16 @@ elab "apply_rewrite" t:term : tactic => withMainContext do
   try
     check motive
   catch ex =>
-    throwTacticEx `apply_rewrite mvarId m!"motive is not type correct:{indentD motive}\nError: {ex.toMessageData}"
+    throwTacticEx `opt_rewrite mvarId m!"motive is not type correct:{indentD motive}\nError: {ex.toMessageData}"
 
-  /- Proves `f poison = poison`. -/
-  let proveCongruence (motive : Expr) : MetaM Expr := do
-    let poison := mkApp (.const ``poison []) n
-    let poison_app := mkApp motive poison
-    let goalType ← mkEq poison_app poison
-
-    let proofMVar ← mkFreshExprMVar goalType .synthetic `h_cong_proof
-
-    let ctx ← Simp.mkContext
-      (config := { beta := true })
-      (simpTheorems := #[← getSimpTheorems, ← iNInst.getTheorems])
-      (congrTheorems := (← getSimpCongrTheorems))
-    let (result?, _) ← simpGoal proofMVar.mvarId! ctx
-
-    if let some (_, x) := result? then
-      throwTacticEx `apply_rewrite x
-        m!"unable to prove congruence goal `motive poison = poison` automatically with `simp [simp_iN]`"
-
-    instantiateMVars proofMVar
-
-  let motiveProof ← proveCongruence motive
+  let motiveProof ← liftMetaM $ proveCongruence motive n
   let congrProof ← mkAppM ``Rewrite.congrApp #[motive, motiveProof, heq]
+
+  -- h : lhs ~> lhs'
+  -- ⊢ lhs ~> rhs
+
+  -- Rewrite.trans (lhs ~> lhs') (lhs' ~> rhs) (lhs ~> rhs)
+  --                             ^^^^^^^^^^^^^ create a new metavariable/goal
 
   /- Construct final proof term with `Rewrite.trans` and a new goal. -/
   let unreducedLhsNew := mkApp motive y
@@ -82,5 +70,5 @@ elab "apply_rewrite" t:term : tactic => withMainContext do
 
   replaceMainGoal [finalGoalId]
 
-macro "apply_rw " t:term : tactic =>
-  `(tactic| (apply_rewrite $t; try (with_reducible rfl)))
+macro "opt_rw " t:term : tactic =>
+  `(tactic| (opt_rewrite $t; try (with_reducible rfl)))

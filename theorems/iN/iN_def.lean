@@ -23,7 +23,7 @@ instance : Inhabited (iN n) where
 
 namespace iN
 
-@[simp]
+@[simp_iN]
 theorem ofNat_eq_bitvec_ofNat {n val} :
   (no_index (OfNat.ofNat val) : iN n) = iN.bitvec (BitVec.ofNat n val) := rfl
 

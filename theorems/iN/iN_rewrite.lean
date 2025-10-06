@@ -30,7 +30,7 @@ theorem poison_rewrite {n} (x : iN n)
   case bitvec a =>
     exact Rewrite.poison_forge a
   case poison =>
-    exact Rewrite.refl poison
+    rfl
 
 /-- Values cannot be rewritten to poison. -/
 @[simp]
@@ -57,7 +57,7 @@ theorem rewrite_poison_iff {n} {x : iN n}
 theorem rewrite_refl {n} (x : iN n)
     : x <~> x := by
 
-  constructor <;> exact Rewrite.refl x
+  constructor <;> rfl
 
 instance {n} : @Std.Refl (iN n) Rewrite where
   refl := Rewrite.refl
@@ -76,7 +76,8 @@ theorem trans {n} {x y z : iN n}
     exact poison_rewrite z
 
 /--
-Rewrite congruence. Even though no instruction should be able to "observe" poison, `wf` must still be an assumption.
+Rewrite congruence. Even though no instruction should be able to
+"observe" poison, `wf` must still be an assumption.
 -/
 theorem congrApp {n} (f : iN n → iN n)
     (wf : f poison = poison)
@@ -84,7 +85,7 @@ theorem congrApp {n} (f : iN n → iN n)
 
   cases h
   case refl =>
-    exact Rewrite.refl (f a)
+    rfl
   case poison_forge v =>
     rw [wf]
     exact poison_rewrite (f (bitvec v))
@@ -171,7 +172,6 @@ theorem rewrite_if_then_iff {n} (c : Prop) [Decidable c] (x : iN n) (y1 y2 : iN 
 
   split <;> simp [*]
 
--- recreate the above for RewriteIff
 @[simp, grind]
 theorem rewrite_iff_bitvec_bitvec {n} (a b : BitVec n)
     : (bitvec a <~> bitvec b) ↔ a = b := by
@@ -285,8 +285,6 @@ theorem poison_rewrite_bitvec_iff {n} (a : BitVec n)
 
 @[simp]
 theorem poison_rewrite_poison_iff {n}
-    : ((poison : iN n) <~> poison) := by
-
-  constructor <;> exact Rewrite.refl poison
+    : ((poison : iN n) <~> poison) := by rfl
 
 end Rewrite
