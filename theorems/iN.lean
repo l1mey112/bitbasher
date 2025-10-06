@@ -6,4 +6,3 @@ import theorems.iN.iN_rewrite
 import theorems.iN.iN_tactic_blast
 import theorems.iN.tactics.iN_tactic_rewrite
 import theorems.iN.tactics.iN_tactic_opt
---import theorems.Core.Attrs.Attrs
