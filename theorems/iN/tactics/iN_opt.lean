@@ -40,3 +40,5 @@ def elabOptprocPattern : CommandElab := fun stx => do
     let declName ← realizeGlobalConstNoOverload declName
     discard <| checkOptprocType declName
     registerOptProc declName
+
+syntax (name := opt) "opt" ("ideal")? : attr

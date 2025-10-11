@@ -23,14 +23,19 @@ abbrev OptProc := Expr → MetaM (Option OptResult)
 
 abbrev OptProcList := Array (OptProcDecl × OptProc)
 
+structure OptConfig where
+  prove_rewrites : Bool := true
+  procs : OptProcList
+deriving Inhabited
+
 structure OptState where
   -- TODO memo
   -- lhs ~> rhs
   rewrites : Array Expr
-  procs : OptProcList
+  memo : Std.HashMap Expr (Option OptResult)
 deriving Inhabited
 
-abbrev OptM := StateRefT OptState MetaM
+abbrev OptM := ReaderT OptConfig $ StateRefT OptState MetaM
 
 structure OptProcDeclExtState where
   entries : PHashMap Name Unit := {}

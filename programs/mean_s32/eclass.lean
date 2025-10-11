@@ -33,6 +33,7 @@ theorem add_zero (x : iN 32) : x + 0 ~> x := by
   cases x
   all_goals simp [simp_iN]
 
+-- x + 0 ~> x
 optproc addZero := fun e => do
   let_expr HAdd.hAdd _ _ _ _ p q := e | return none
 
@@ -41,9 +42,12 @@ optproc addZero := fun e => do
 
   return none
 
-def root₁ (x y : iN 32) := x +nsw y + 0
+def root₁ (x y : iN 32) := (x +nsw y) + 0 + 0
 
 def root := ⟨⟨root₁⟩⟩ -- "optimise" `root₁`
 
 example (x y : iN 32) : root₁ x y ~> root x y := by
   opt_showcorrect root₁ root
+
+example (x : iN 32) : x + 0 + 0 + 0 + 0 + 0 + 0 + 0 ~> x := by
+  opt

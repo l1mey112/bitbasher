@@ -31,11 +31,11 @@ def getiNBitWidthFromType (ty : Expr) : MetaM Expr := do
 
 namespace OptM
 
-def runOptM (procs : OptProcList) (x : OptM α) : MetaM α :=
-  x.run' { procs := procs, rewrites := #[] }
+def runOptM (config : OptConfig) (x : OptM α) : MetaM α :=
+  (x.run config).run' default
 
 def handleOpt (expr : Expr) : OptM $ Option OptResult := do
-  let procs := (← get).procs
+  let procs := (← read).procs
 
   for (_, proc) in procs do
     match ← proc expr with
@@ -46,24 +46,35 @@ def handleOpt (expr : Expr) : OptM $ Option OptResult := do
   return none
 
 def handleSingleRewrite (motive motive_wf : Expr) (hole : Expr) : OptM Expr := do
+  let mut res : Option OptResult := none
+
+  let st := (← get)
+  if h : st.memo.contains hole then
+    res := st.memo[hole]
+  else
+    res ← handleOpt hole
+    modify fun s => { s with memo := st.memo.insert hole res }
+
   /- try optimising, or do nothing -/
-  let some optResult ← handleOpt hole
+  let some optResult := res
     | return hole
 
-  let bw ← getiNBitWidth hole
+  if (← read).prove_rewrites then
+    let bw ← getiNBitWidth hole
 
-  let proof ←
-    match optResult.proof? with
-    | some p => pure p
-    | none   => pure (mkAppN (mkConst ``Rewrite.refl) #[bw, hole])
+    let proof ←
+      match optResult.proof? with
+      | some p => pure p
+      | none   => pure (mkAppN (mkConst ``Rewrite.refl) #[bw, hole])
 
-  -- optResult.proof : hole ~> optResult.expr
-  -- ⊢ abstract hole ~> abstract optResult.expr
-  let congrProof ← mkAppM ``Rewrite.congrApp #[motive, motive_wf, proof]
-  trace[Meta.opti] m!"rewrite {hole} ~> {optResult.expr} by {proof}"
+    -- optResult.proof : hole ~> optResult.expr
+    -- ⊢ abstract hole ~> abstract optResult.expr
+    let congrProof ← mkAppM ``Rewrite.congrApp #[motive, motive_wf, proof]
+    trace[Meta.opti] m!"rewrite {hole} ~> {optResult.expr} by {proof}"
 
-  -- append proof to state
-  modify fun s => { s with rewrites := s.rewrites.push congrProof }
+    -- append proof to state
+    modify fun s => { s with rewrites := s.rewrites.push congrProof }
+
   return optResult.expr
 
 def handleRewrites (abstract : Expr) (hole : Expr) : OptM Expr := do
@@ -73,7 +84,10 @@ def handleRewrites (abstract : Expr) (hole : Expr) : OptM Expr := do
   -- optResult.proof : hole ~> optResult.expr
   -- ⊢ abstract hole ~> abstract optResult.expr
   let motive := Lean.mkLambda `_a BinderInfo.default α abstract
-  let motive_wf ← proveCongruence motive bw
+  let mut motive_wf := default
+
+  if (← read).prove_rewrites then
+    motive_wf ← proveCongruence motive bw
 
   let mut expr := hole
 
@@ -150,7 +164,8 @@ elab "⟨⟨" func:term "⟩⟩" : term => do
 
   let optprocs ← getOptProcs
 
-  let expr ← lambdaTelescope func fun xs A => OptM.runOptM optprocs do
+  let config : OptConfig := { prove_rewrites := false, procs := optprocs }
+  let expr ← lambdaTelescope func fun xs A => OptM.runOptM config do
     let B ← walkAndTransform A
     mkLambdaFVars xs B
 
@@ -171,7 +186,7 @@ elab "opti" : tactic => withMainContext do
   | Rewrite n lhs rhs => pure (n, lhs, rhs)
   | _ => throwTacticEx `opt_rewrite mvarId m!"not a rewrite{indentExpr e}"
 
-  let newGoal ← OptM.runOptM optprocs do
+  let newGoal ← OptM.runOptM { procs := optprocs } do
     let lhs' ← walkAndTransform lhs
     let some proof ← OptM.proveRewrites
       | throwTacticEx `opt mvarId "no rewrites were performed"
