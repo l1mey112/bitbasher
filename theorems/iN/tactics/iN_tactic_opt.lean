@@ -5,7 +5,6 @@ import theorems.iN.iN_lemmas
 import theorems.iN.iN_rewrite
 
 import theorems.iN.tactics.shared
-import theorems.iN.tactics.iN_opt
 
 open Lean Elab Tactic Meta
 
@@ -31,39 +30,83 @@ def getiNBitWidthFromType (ty : Expr) : MetaM Expr := do
 
 namespace OptM
 
-def runOptM (procs : OptProcList) (x : OptM α) : MetaM α :=
-  x.run' { procs := procs, rewrites := #[] }
+def runOptM (config : OptConfig) (x : OptM α) : MetaM α :=
+  (x.run config).run' default
 
-def handleOpt (expr : Expr) : OptM $ Option OptResult := do
-  let procs := (← get).procs
+def tryTheorem? (expr : Expr) (opt : OptDecl) : OptM $ Option OptResult := do
+  let val := mkConst opt.declName []
+  let type ← inferType val
+  let (xs, _, type) ← forallMetaTelescopeReducing type
+  let type ← whnf (← instantiateMVars type)
+  let lhs := type.appFn!.appArg!
 
-  for (_, proc) in procs do
+  if ← isDefEq lhs expr then
+    let proof ← instantiateMVars (mkAppN val xs)
+    if (← hasAssignableMVar proof) then
+      trace[Meta.opti.tryTheorem] "{repr opt}, has unassigned metavariables after unification"
+      return none
+
+    let rhs := (← instantiateMVars type).appArg!
+    return some { expr := rhs, proof? := some proof }
+
+  return none
+
+def handleOpt? (expr : Expr) : OptM $ Option OptResult := do
+  let st := (← read)
+
+  /- try optprocs -/
+  for (_, proc) in st.procs do
     match ← proc expr with
     | some { expr := expr', proof? } =>
       return some { expr := expr', proof? }
     | none => continue
 
-  return none
+  /- try theorems -/
+  let candidates ← st.theorems.getMatch expr
+  if candidates.isEmpty then
+    return none
+
+  /- ideal theorems have no priority. they always work to move
+    an expression to a unique normal form -/
+
+  if candidates.size > 1 then
+    /- we have malformed rules, just a warn -/
+    logInfo m!"multiple candidate theorems matched\n{candidates.map (·.declName)}"
+
+  /- attempt this -/
+  let opt := candidates[0]!
+  tryTheorem? expr opt
 
 def handleSingleRewrite (motive motive_wf : Expr) (hole : Expr) : OptM Expr := do
+  let mut res : Option OptResult := none
+
+  let st := (← get)
+  if h : st.memo.contains hole then
+    res := st.memo[hole]
+  else
+    res ← handleOpt? hole
+    modify fun s => { s with memo := st.memo.insert hole res }
+
   /- try optimising, or do nothing -/
-  let some optResult ← handleOpt hole
+  let some optResult := res
     | return hole
 
-  let bw ← getiNBitWidth hole
+  if (← read).prove_rewrites then
+    let bw ← getiNBitWidth hole
 
-  let proof ←
-    match optResult.proof? with
-    | some p => pure p
-    | none   => pure (mkAppN (mkConst ``Rewrite.refl) #[bw, hole])
+    let proof ←
+      match optResult.proof? with
+      | some p => pure p
+      | none   => pure (mkAppN (mkConst ``Rewrite.refl) #[bw, hole])
 
-  -- optResult.proof : hole ~> optResult.expr
-  -- ⊢ abstract hole ~> abstract optResult.expr
-  let congrProof ← mkAppM ``Rewrite.congrApp #[motive, motive_wf, proof]
-  trace[Meta.opti] m!"rewrite {hole} ~> {optResult.expr} by {proof}"
+    -- optResult.proof : hole ~> optResult.expr
+    -- ⊢ abstract hole ~> abstract optResult.expr
+    let congrProof ← mkAppM ``Rewrite.congrApp #[motive, motive_wf, proof]
+    trace[Meta.opti] m!"rewrite {hole} ~> {optResult.expr} by {proof}"
 
-  -- append proof to state
-  modify fun s => { s with rewrites := s.rewrites.push congrProof }
+    -- append proof to state
+    modify fun s => { s with rewrites := s.rewrites.push congrProof }
+
   return optResult.expr
 
 def handleRewrites (abstract : Expr) (hole : Expr) : OptM Expr := do
@@ -73,7 +116,10 @@ def handleRewrites (abstract : Expr) (hole : Expr) : OptM Expr := do
   -- optResult.proof : hole ~> optResult.expr
   -- ⊢ abstract hole ~> abstract optResult.expr
   let motive := Lean.mkLambda `_a BinderInfo.default α abstract
-  let motive_wf ← proveCongruence motive bw
+  let mut motive_wf := default
+
+  if (← read).prove_rewrites then
+    motive_wf ← proveCongruence motive bw
 
   let mut expr := hole
 
@@ -91,6 +137,7 @@ def proveRewrites : OptM $ Option Expr := do
   if st.rewrites.isEmpty then
     return none
 
+  -- transitively chain everything
   let mut finalProof := st.rewrites[0]!
   for proof in st.rewrites[1:] do
     finalProof ← mkAppM ``Rewrite.trans #[finalProof, proof]
@@ -98,15 +145,6 @@ def proveRewrites : OptM $ Option Expr := do
   return some finalProof
 
 end OptM
-
-
-structure RewriteSite where
-  /-- The expression with a subterm replaced by a bound variable `#0`.
-      In this single-pass model, this is the *local* abstract, not the global one. -/
-  abstract : Expr
-  /-- The subterm that was replaced by the hole (`#0`). -/
-  filler   : Expr
-  deriving Inhabited
 
 partial def walkAndTransform (e : Expr) : OptM Expr := do
   /- let cache ← IO.mkRef (α := Std.HashMap Expr Expr) {} -/
@@ -149,8 +187,10 @@ elab "⟨⟨" func:term "⟩⟩" : term => do
   let func ← unfoldDefinition func
 
   let optprocs ← getOptProcs
+  let optTheorems ← getOptTheorems
 
-  let expr ← lambdaTelescope func fun xs A => OptM.runOptM optprocs do
+  let config : OptConfig := { prove_rewrites := false, procs := optprocs, theorems := optTheorems }
+  let expr ← lambdaTelescope func fun xs A => OptM.runOptM config do
     let B ← walkAndTransform A
     mkLambdaFVars xs B
 
@@ -165,13 +205,14 @@ elab "opti" : tactic => withMainContext do
   let e ← instantiateMVars e
 
   let optprocs ← getOptProcs
+  let optTheorems ← getOptTheorems
 
   -- lhs ~> rhs
   let (_, lhs, rhs) ← match_expr e with
   | Rewrite n lhs rhs => pure (n, lhs, rhs)
   | _ => throwTacticEx `opt_rewrite mvarId m!"not a rewrite{indentExpr e}"
 
-  let newGoal ← OptM.runOptM optprocs do
+  let newGoal ← OptM.runOptM { procs := optprocs, theorems := optTheorems } do
     let lhs' ← walkAndTransform lhs
     let some proof ← OptM.proveRewrites
       | throwTacticEx `opt mvarId "no rewrites were performed"

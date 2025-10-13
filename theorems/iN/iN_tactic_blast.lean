@@ -77,15 +77,15 @@ macro_rules
         | bv_normalize
     )
   )
-  | `(tactic| blast $tac) => `(tactic|
+  | `(tactic| blast $h) => `(tactic|
     (
       iN_convert_goal_bitvec
       simp [simp_iN]
       -- there might be no more goals after this
       all_goals solve
         | grind
-        | cases $tac <;> grind
-        | cases $tac
+        | cases $h <;> grind
+        | cases $h
           blast_bv
     )
   )
