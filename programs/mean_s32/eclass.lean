@@ -1,4 +1,5 @@
 import theorems.iN
+import theorems.ideal
 
 import Lean
 
@@ -35,34 +36,30 @@ theorem rewrite_test₃ (x y : iN n) : x + y + 1 ~> y + x + 1 := by
 -- given some expr, optimise to expr' with proof that expr ~> expr'
 set_option trace.Meta.opti true
 
+--  (no_index (OfNat.ofNat val) : iN n) = iN.bitvec (BitVec.ofNat n val) := rfl
+
 /- @[opt ideal]
-theorem add_zero (x : iN 32) : x + 0 ~> x := by
-  cases x
-  all_goals simp [simp_iN] -/
+theorem t {n val} : x - (no_index (OfNat.ofNat val) : iN n) ~> x + (-val) := -/
 
--- x + 0 ~> x
-/- optproc addZero := fun e => do
-  let_expr HAdd.hAdd _ _ _ _ p q := e | return none
+/- use optprocs for this -/
 
-  if let some (0, _) := (← getOfNatValue? q ``iN) then
-    return some { expr := p, proof? := ← mkAppM ``add_zero #[p] }
+-- a - immediate => a + -immediate
+-- (a + con1) - (b + con2) => (a - b) + (con1 - con2)
 
-  return none -/
+/- // commutativity opts (we want a canonical form).
+        int ap = node_pos(a);
+        int bp = node_pos(b);
+        if (ap < bp || (ap == bp && a->gvn > b->gvn)) {
+            set_input(f, n, b, 1);
+            set_input(f, n, a, 2);
+            return n;
+        } -/
 
-/- def root₁ (x y : iN 32) := (x +nsw y) + 0 + 0
+-- 1 ≤ x ∧ x ≤ 2
 
-def root := ⟨⟨root₁⟩⟩ -- "optimise" `root₁`
+#eval getOptDecls
 
-#print root
-
-example (x y : iN 32) : root₁ x y ~> root x y := by
-  opt_showcorrect root₁ root -/
-
-
-@[opt ideal]
-theorem add_zeron {n} (x : iN n) : x + 0 ~> x := by
-  cases x
-  all_goals simp [simp_iN]
+#check ForIn
 
 example {n} (x : iN n) : x + 0 + 0 + 0 + 0 + 0 ~> x := by
-  opt
+  simp
